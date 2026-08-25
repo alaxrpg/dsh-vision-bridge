@@ -228,7 +228,7 @@ async function imageToDataUrl(ctx, attachment) {
 // ============================================================================
 
 export const name = 'dsh-vision-bridge'
-export const inject = ['tools', 'llm']
+export const inject = ['tools', 'llm', 'webServer']
 
 export function apply(ctx, config = {}) {
   // 读取配置
@@ -291,6 +291,14 @@ export function apply(ctx, config = {}) {
     ctx.tools.register(readImageTool)
   } catch (error) {
     console.error(`[dsh-vision-bridge] 工具注册失败: ${error}`)
+  }
+
+  // 注册 web 路由（粘贴上传和 verdict 判断）
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['webServer'], (scope) => {
+      registerPasteRoute(scope, visionConfig, ownProviders)
+      registerVerdictRoute(scope, ownProviders)
+    })
   }
 }
 
@@ -513,4 +521,150 @@ async function convertImagesToEvidence(ctx, messages, config, evidenceCache) {
   }
 
   return converted
+}
+
+// ============================================================================
+// Web 路由：粘贴上传和 Verdict 判断
+// ============================================================================
+
+// 图片魔数检测
+const PASTE_SNIFFS = [
+  {
+    ext: '.png',
+    test: (b) => b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
+  },
+  { ext: '.jpg', test: (b) => b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: '.gif', test: (b) => b.length >= 6 && ['GIF87a', 'GIF89a'].includes(b.toString('ascii', 0, 6)) },
+  { ext: '.webp', test: (b) => b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP' },
+]
+const PASTE_MAX_BYTES = 25 * 1024 * 1024
+
+function registerPasteRoute(ctx, config, ownProviders) {
+  if (!ctx.webServer?.register) return
+
+  ctx.webServer.register({
+    name: 'vision-bridge-paste',
+    kind: 'exact',
+    path: '/vision-bridge/paste',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405).end()
+        return
+      }
+
+      try {
+        const chunks = []
+        let total = 0
+        for await (const chunk of req) {
+          total += chunk.length
+          if (total > PASTE_MAX_BYTES) {
+            res.writeHead(413, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: `Image over ${PASTE_MAX_BYTES}-byte limit` }))
+            req.destroy()
+            return
+          }
+          chunks.push(chunk)
+        }
+
+        const buffer = Buffer.concat(chunks)
+        const sniff = PASTE_SNIFFS.find((s) => s.test(buffer))
+        if (!sniff) {
+          res.writeHead(400, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Not a recognized image (png/jpeg/gif/webp)' }))
+          return
+        }
+
+        const { mkdtemp, writeFile } = await import('node:fs/promises')
+        const { join } = await import('node:path')
+        const { tmpdir } = await import('node:os')
+
+        const root = join(tmpdir(), 'dsh-vision-bridge')
+        const { mkdirSync } = await import('node:fs')
+        mkdirSync(root, { recursive: true })
+
+        const dir = await mkdtemp(join(root, 'paste-'))
+        const file = join(dir, `paste${sniff.ext}`)
+        await writeFile(file, buffer, { mode: 0o600 })
+
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ path: file }))
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: String(error?.message || error) }))
+      }
+    },
+  })
+}
+
+function registerVerdictRoute(ctx, ownProviders) {
+  if (!ctx.webServer?.register) return
+
+  ctx.webServer.register({
+    name: 'vision-bridge-verdict',
+    kind: 'exact',
+    path: '/vision-bridge/verdict',
+    handler: async (req, res) => {
+      if (req.method !== 'GET') {
+        res.writeHead(405).end()
+        return
+      }
+
+      try {
+        const url = new URL(req.url, 'http://localhost')
+        const label = url.searchParams.get('model') || ''
+
+        // 检查是否是 wrapper provider 自己
+        if (/\(vision bridge\)/i.test(label)) {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ takeover: false }))
+          return
+        }
+
+        // 检查模型是否支持图片
+        const llm = ctx.llm
+        if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ takeover: false }))
+          return
+        }
+
+        const lowered = label.toLowerCase()
+        let matchedAny = false
+
+        for (const info of llm.listProviders()) {
+          const providerId = typeof info === 'string' ? info : info?.id
+          if (!providerId || ownProviders?.has(providerId)) continue
+
+          let models = []
+          try {
+            models = await llm.listModels(providerId)
+          } catch {
+            continue
+          }
+
+          for (const model of models) {
+            for (const candidate of [model?.name, model?.id]) {
+              if (typeof candidate !== 'string' || candidate.length < 3) continue
+              if (!lowered.includes(candidate.toLowerCase())) continue
+
+              const modalities = model?.inputModalities
+              if (!Array.isArray(modalities) || modalities.includes('image')) {
+                // 模型支持图片，不需要接管
+                res.writeHead(200, { 'content-type': 'application/json' })
+                res.end(JSON.stringify({ takeover: false }))
+                return
+              }
+              matchedAny = true
+            }
+          }
+        }
+
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ takeover: matchedAny }))
+      } catch (error) {
+        res.writeHead(500, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: String(error?.message || error) }))
+      }
+    },
+  })
 }
