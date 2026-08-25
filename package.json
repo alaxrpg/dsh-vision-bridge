@@ -1,12 +1,16 @@
 {
   "name": "dsh-vision-bridge",
-  "version": "0.1.0",
-  "description": "DSH 插件：为纯文本模型提供视觉能力，支持任意 OpenAI 兼容多模态 API",
+  "version": "0.2.0",
+  "description": "DSH 插件：为纯文本模型提供视觉能力，支持任意 OpenAI 兼容多模态 API，带设置页可视化配置",
   "type": "module",
   "main": "dsh/index.js",
+  "exports": {
+    ".": "./dsh/index.js",
+    "./client": "./dsh/client.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dsh/",
-    "dist/",
     "README.md",
     "LICENSE"
   ],
@@ -15,7 +19,12 @@
     "test": "node --test dsh/*.test.js"
   },
   "dsh": {
-    "bundle": "dsh/index.js"
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
   },
   "keywords": [
     "dsh",
@@ -30,5 +39,13 @@
   "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   }
 }

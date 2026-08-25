@@ -1,39 +1,57 @@
 // dsh-vision-bridge: 为 DSH 纯文本模型提供视觉能力的通用桥接插件
 // 支持任意 OpenAI 兼容多模态 API（SenseNova、OpenAI、Gemini、Ollama 等）
+//
+// v0.2.0: 接入 DSH settings 服务（settings.yaml 的 vision-bridge 命名空间），
+// 配置可视化编辑（设置页「视觉桥接」分节）、热重载、连通性测试。
 
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 // ============================================================================
-// 配置
+// 常量与预设
 // ============================================================================
 
-const DEFAULT_TIMEOUT_MS = 90_000
-const SETTINGS_NAMESPACE = 'visionBridge'
+const DEFAULT_TIMEOUT_S = 90
+const SETTINGS_NAMESPACE = 'vision-bridge'
+const LEGACY_NAMESPACE = 'visionBridge'
 
-// Provider 预设
+// Provider 预设（客户端下拉 + 服务端缺省解析共用）
 const PROVIDER_PRESETS = {
   sensennova: {
+    label: 'SenseNova（sensenova-u1-fast）',
     baseUrl: 'https://token.sensenova.cn/v1',
     model: 'sensenova-u1-fast',
     apiKeyEnv: 'SENSENNOVA_API_KEY',
   },
   openai: {
+    label: 'OpenAI（gpt-4o）',
     baseUrl: 'https://api.openai.com/v1',
     model: 'gpt-4o',
     apiKeyEnv: 'OPENAI_API_KEY',
   },
   gemini: {
+    label: 'Gemini（gemini-2.0-flash）',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     model: 'gemini-2.0-flash',
     apiKeyEnv: 'GEMINI_API_KEY',
   },
   ollama: {
+    label: 'Ollama（llava 本地）',
     baseUrl: 'http://localhost:11434/v1',
     model: 'llava',
     apiKeyEnv: 'OLLAMA_API_KEY',
   },
+}
+
+const CONFIG_DEFAULTS = {
+  enabled: true,
+  provider: 'sensennova',
+  baseUrl: '',
+  model: '',
+  apiKeyEnv: '',
+  apiKey: '',
+  timeout: DEFAULT_TIMEOUT_S,
 }
 
 // 纯文本模型家族前缀（用于自动发现需要 wrapper 的模型）
@@ -43,7 +61,7 @@ const TEXT_ONLY_FAMILIES = ['deepseek', 'glm', 'qwen', 'mimo']
 const VISION_ID_PATTERN = /(vl|ocr|janus|v\d|vision|multimodal|u1|u1\.5)/i
 
 // ============================================================================
-// 工具定义
+// 工具定义（vision_bridge_read_image 的输出 schema）
 // ============================================================================
 
 const VISION_SCHEMA = {
@@ -155,7 +173,7 @@ function guessMime(path) {
 // ============================================================================
 
 async function callVisionApi(config, images, prompt, signal) {
-  const { baseUrl, apiKey, model, timeout = DEFAULT_TIMEOUT_MS } = config
+  const { baseUrl, apiKey, model, timeoutMs } = config
 
   const content = [{ type: 'text', text: prompt }]
   for (let i = 0; i < images.length; i++) {
@@ -179,10 +197,10 @@ async function callVisionApi(config, images, prompt, signal) {
     headers: {
       'Authorization': `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'User-Agent': 'dsh-vision-bridge/0.1.0',
+      'User-Agent': 'dsh-vision-bridge/0.2.0',
     },
     body,
-    signal: AbortSignal.timeout(timeout),
+    signal: signal ?? AbortSignal.timeout(timeoutMs),
   })
 
   if (!response.ok) {
@@ -220,7 +238,108 @@ async function imageToDataUrl(ctx, attachment) {
   const data = await readFile(attachment.path)
   const mime = sniffMime(data) || guessMime(attachment.path)
   const base64 = data.toString('base64')
-  return `data:${mime};base64},${base64}`
+  return `data:${mime};base64,${base64}`
+}
+
+// ============================================================================
+// 配置解析：settings 服务 > settings.yaml(vision-bridge) > 预设缺省
+// ============================================================================
+
+// 将用户 section 解析为运行时配置（预设填空 + 秒转毫秒 + API key 解析）
+function resolveSection(section) {
+  const merged = { ...CONFIG_DEFAULTS, ...(section ?? {}) }
+  const preset = PROVIDER_PRESETS[merged.provider] ?? {}
+
+  const baseUrl = merged.baseUrl?.trim() || preset.baseUrl || ''
+  const model = merged.model?.trim() || preset.model || ''
+  const apiKeyEnv = merged.apiKeyEnv?.trim() || preset.apiKeyEnv || ''
+  const timeoutS = Number.isFinite(merged.timeout) && merged.timeout >= 5 && merged.timeout <= 600
+    ? merged.timeout
+    : DEFAULT_TIMEOUT_S
+
+  let apiKey = typeof merged.apiKey === 'string' ? merged.apiKey.trim() : ''
+  let keySource = 'none'
+  if (apiKey) {
+    keySource = 'settings'
+  } else if (apiKeyEnv && process.env[apiKeyEnv]) {
+    apiKey = process.env[apiKeyEnv]
+    keySource = 'env'
+  }
+
+  return {
+    enabled: merged.enabled !== false,
+    provider: merged.provider || 'sensennova',
+    baseUrl,
+    model,
+    apiKeyEnv,
+    apiKey,
+    keySource,
+    timeout: timeoutS,
+    timeoutMs: timeoutS * 1000,
+  }
+}
+
+// settings.yaml 直读兜底（settings 服务不可用时仍可工作；兼容旧 visionBridge 键）
+function readSettingsSection() {
+  const candidates = [
+    process.env.DSH_SETTINGS_PATH,
+    join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'settings.yaml'),
+    join(homedir(), '.dsh', 'settings.yaml'),
+  ]
+  for (const file of candidates) {
+    if (!file) continue
+    try {
+      const text = readFileSync(file, 'utf8')
+      // 轻量解析顶层 vision-bridge / visionBridge 段（避免依赖 yaml 库）
+      const section = extractTopLevelSection(text, SETTINGS_NAMESPACE)
+        ?? extractTopLevelSection(text, LEGACY_NAMESPACE)
+      if (section) return section
+    } catch { /* 文件不存在则尝试下一个候选 */ }
+  }
+  return {}
+}
+
+function extractTopLevelSection(text, key) {
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex(l => new RegExp(`^${key}\\s*:`).test(l))
+  if (start === -1) return null
+  const out = {}
+  const entry = /^\s{2}([A-Za-z0-9_-]+):\s*(.*)$/
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^\S/.test(line)) break // 下一个顶层键
+    const m = entry.exec(line)
+    if (!m) continue
+    let value = m[2].trim()
+    if (value === '' || value === 'null' || value === '~') continue
+    value = value.replace(/^['"]|['"]$/g, '')
+    if (value === 'true') out[m[1]] = true
+    else if (value === 'false') out[m[1]] = false
+    else if (/^-?\d+(\.\d+)?$/.test(value)) out[m[1]] = Number(value)
+    else out[m[1]] = value
+  }
+  return out
+}
+
+// 加载 schemastery schema（宿主提供；不可用时退化为带缺省的透传 schema）
+async function loadConfigSchema() {
+  try {
+    const mod = await import('@deepseek-ai/schemastery')
+    const Schema = mod.default ?? mod
+    return Schema.object({
+      enabled: Schema.boolean().default(true),
+      provider: Schema.string().default('sensennova'),
+      baseUrl: Schema.string().default(''),
+      model: Schema.string().default(''),
+      apiKeyEnv: Schema.string().default(''),
+      apiKey: Schema.string().default(''),
+      timeout: Schema.number().default(DEFAULT_TIMEOUT_S),
+    })
+  } catch {
+    const passthrough = (value) => ({ ...CONFIG_DEFAULTS, ...(value ?? {}) })
+    passthrough.toJSON = () => ({ type: 'object' })
+    return passthrough
+  }
 }
 
 // ============================================================================
@@ -231,112 +350,86 @@ export const name = 'dsh-vision-bridge'
 export const inject = ['tools', 'llm', 'webServer']
 
 export function apply(ctx, config = {}) {
-  // 读取配置
-  const visionConfig = resolveConfig(ctx, config)
-  if (!visionConfig) {
-    console.error('[dsh-vision-bridge] 未配置 vision provider，插件未激活')
-    return
+  // 运行时可变状态：state.config 是当前生效的 resolveSection() 结果
+  const state = {
+    config: null,        // 当前生效配置
+    settingsFace: null,  // { service } 可写设置面（settings 服务接入后非空）
+    providerRegistered: false,
   }
 
-  const evidenceCache = new Map()
-  const ownProviders = new Set()
+  const setState = (resolved, source) => {
+    state.config = resolved
+    const where = resolved.keySource === 'settings'
+      ? 'settings.yaml'
+      : resolved.keySource === 'env' ? resolved.apiKeyEnv : '缺失'
+    console.error(
+      `[dsh-vision-bridge] 配置已加载(${source}): provider=${resolved.provider} model=${resolved.model} `
+      + `enabled=${resolved.enabled} key=${where}`,
+    )
+    return resolved
+  }
 
-  // 注册 wrapper provider
+  // section（用户层）优先，插件 config（cordis.patch.yml config: 段）作底座
+  const refreshConfig = (section, source) => {
+    const base = {}
+    if (config && typeof config === 'object') {
+      for (const key of Object.keys(CONFIG_DEFAULTS)) {
+        if (config[key] !== undefined) base[key] = config[key]
+      }
+    }
+    return setState(resolveSection({ ...base, ...(section ?? {}) }), source)
+  }
+
+  // 初始解析：settings.yaml 直读（settings 服务接入后被权威值覆盖）
+  refreshConfig(readSettingsSection(), 'settings.yaml')
+
   if (typeof ctx.inject === 'function') {
+    // 可选接入 settings 服务：注册命名空间 + 热重载 + 可写面
+    ctx.inject(['settings'], async (sctx) => {
+      const schema = await loadConfigSchema()
+      try {
+        const scope = sctx.settings.register(SETTINGS_NAMESPACE, schema, { base: config ?? {} })
+        state.settingsFace = { service: sctx.settings }
+
+        const applyScope = () => {
+          try {
+            // scope.get() 已合并 schema 缺省 + base + 用户段
+            refreshConfig(scope.get(), 'settings 服务')
+          } catch (error) {
+            console.error(`[dsh-vision-bridge] 配置解析失败，保留旧值: ${error?.message ?? error}`)
+          }
+        }
+        applyScope()
+        scope.watch(() => applyScope())
+      } catch (error) {
+        // 命名空间已被其他实例注册等场景：退回直读模式
+        console.error(`[dsh-vision-bridge] settings 命名空间注册失败(退回直读模式): ${error?.message ?? error}`)
+      }
+    })
+
     ctx.inject(['llm'], (scope) => {
-      registerVisionProvider(scope, visionConfig, ownProviders, evidenceCache)
+      registerVisionProvider(scope, state)
+    })
+
+    ctx.inject(['webServer'], (scope) => {
+      registerPasteRoute(scope, state)
+      registerVerdictRoute(scope, state)
+      registerConfigRoutes(scope, state)
     })
   } else {
-    registerVisionProvider(ctx, visionConfig, ownProviders, evidenceCache)
+    registerVisionProvider(ctx, state)
+    registerPasteRoute(ctx, state)
+    registerVerdictRoute(ctx, state)
+    registerConfigRoutes(ctx, state)
   }
 
-  // 注册工具
-  const readImageTool = {
-    name: 'vision_bridge_read_image',
-    description:
-      'Read an image through the vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with OCR text, layout regions, and semantics.',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: {
-          type: 'string',
-          description: 'Absolute local file path or http(s) URL of the image',
-        },
-        prompt: {
-          type: 'string',
-          description: 'Optional extra focus for the reading',
-        },
-      },
-      required: ['path'],
-    },
-    output: {
-      schema: VISION_SCHEMA,
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-    },
-    timeoutMs: visionConfig.timeout + 20_000,
-    isConcurrencySafe: () => true,
-    async execute(args) {
-      if (typeof args?.path !== 'string' || args.path.trim() === '') {
-        throw new Error('vision_bridge_read_image needs a non-empty "path"')
-      }
-
-      const prompt = args.prompt || '请用中文详细描述这张图片的内容，包括文字、布局和语义信息'
-      const images = [await resolveImagePath(ctx, args.path)]
-      const result = await callVisionApi(visionConfig, images, prompt)
-      return result
-    },
-  }
-
-  try {
-    ctx.tools.register(readImageTool)
-  } catch (error) {
-    console.error(`[dsh-vision-bridge] 工具注册失败: ${error}`)
-  }
-
-  // 注册 web 路由（粘贴上传和 verdict 判断）
-  if (typeof ctx.inject === 'function') {
-    ctx.inject(['webServer'], (scope) => {
-      registerPasteRoute(scope, visionConfig, ownProviders)
-      registerVerdictRoute(scope, ownProviders)
-    })
-  }
+  // 工具注册（不依赖 settings 服务）
+  registerReadImageTool(ctx, state)
 }
 
 // ============================================================================
-// 配置解析
+// vision_bridge_read_image 工具
 // ============================================================================
-
-function resolveConfig(ctx, pluginConfig) {
-  // 从 settings.yaml 读取 visionBridge 配置
-  let settings = {}
-  try {
-    if (typeof ctx.settings === 'function') {
-      settings = ctx.settings(SETTINGS_NAMESPACE) || {}
-    }
-  } catch {}
-
-  // 合并配置：pluginConfig > settings > presets
-  const providerName = pluginConfig.provider || settings.provider || 'sensennova'
-  const preset = PROVIDER_PRESETS[providerName] || PROVIDER_PRESETS.sensennova
-
-  const baseUrl = pluginConfig.baseUrl || settings.baseUrl || preset.baseUrl
-  const model = pluginConfig.model || settings.model || preset.model
-  const apiKeyEnv = pluginConfig.apiKeyEnv || settings.apiKeyEnv || preset.apiKeyEnv
-  const timeout = pluginConfig.timeout || settings.timeout || DEFAULT_TIMEOUT_MS
-
-  // 解析 API key
-  let apiKey = pluginConfig.apiKey || settings.apiKey || ''
-  if (!apiKey && apiKeyEnv) {
-    apiKey = process.env[apiKeyEnv] || ''
-  }
-
-  if (!apiKey) {
-    console.error(`[dsh-vision-bridge] 未找到 API key，请设置 ${apiKeyEnv} 环境变量`)
-    return null
-  }
-
-  return { baseUrl, apiKey, model, timeout, provider: providerName }
-}
 
 async function resolveImagePath(ctx, path) {
   // 如果是 URL，直接返回
@@ -362,14 +455,61 @@ async function resolveImagePath(ctx, path) {
   const data = await readFile(filePath)
   const mime = sniffMime(data) || guessMime(filePath)
   const base64 = data.toString('base64')
-  return `data:${mime};base64},${base64}`
+  return `data:${mime};base64,${base64}`
+}
+
+function registerReadImageTool(ctx, state) {
+  const readImageTool = {
+    name: 'vision_bridge_read_image',
+    description:
+      'Read an image through the vision bridge. Use whenever a message references an image the current model cannot see: a local file path or an http(s) URL to a screenshot, photo, chart, diagram, or document scan. Returns structured evidence with OCR text, layout regions, and semantics.',
+    parameters: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Absolute local file path or http(s) URL of the image',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Optional extra focus for the reading',
+        },
+      },
+      required: ['path'],
+    },
+    output: {
+      schema: VISION_SCHEMA,
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      if (typeof args?.path !== 'string' || args.path.trim() === '') {
+        throw new Error('vision_bridge_read_image needs a non-empty "path"')
+      }
+
+      const config = state.config
+      if (!config?.apiKey) {
+        throw new Error('vision bridge 未配置 API key（设置 → 视觉桥接）')
+      }
+
+      const prompt = args.prompt || '请用中文详细描述这张图片的内容，包括文字、布局和语义信息'
+      const images = [await resolveImagePath(ctx, args.path)]
+      return await callVisionApi(config, images, prompt)
+    },
+  }
+
+  try {
+    ctx.tools.register({ ...readImageTool, timeoutMs: (state.config?.timeoutMs ?? 90_000) + 20_000 })
+  } catch (error) {
+    console.error(`[dsh-vision-bridge] 工具注册失败: ${error}`)
+  }
 }
 
 // ============================================================================
 // Wrapper Provider 注册
 // ============================================================================
 
-function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
+function registerVisionProvider(ctx, state) {
   const llm = ctx.llm
   if (typeof llm?.registerAdapter !== 'function' || typeof llm?.stream !== 'function') {
     return
@@ -401,6 +541,9 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
         return { id: provider, name: 'Vision Bridge' }
       },
       async listModels(_provider, signal) {
+        // 插件停用时不暴露桥接模型
+        if (!state.config?.enabled) return []
+
         // 获取所有上游模型，过滤出需要 wrapper 的
         const providers = typeof llm.listProviders === 'function' ? llm.listProviders() : []
         const allModels = []
@@ -439,16 +582,20 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
       stream(options) {
         // 在请求时转换图片为文本证据
         return (async function* () {
-          const converted = await convertImagesToEvidence(ctx, options.messages, config, evidenceCache)
+          const config = state.config
+          if (!config?.enabled || !config?.apiKey) {
+            throw new Error('vision bridge 未启用或缺少 API key（设置 → 视觉桥接）')
+          }
+          const converted = await convertImagesToEvidence(ctx, options.messages, config)
           yield* llm.stream({ ...options, messages: converted })
         })()
       },
     })
 
-    ownProviders.add(providerId)
+    state.providerRegistered = true
     console.error(`[dsh-vision-bridge] Vision Bridge provider 注册成功`)
     return () => {
-      ownProviders.delete(providerId)
+      state.providerRegistered = false
       if (typeof registration === 'function') registration()
     }
   } catch (error) {
@@ -461,8 +608,17 @@ function registerVisionProvider(ctx, config, ownProviders, evidenceCache) {
 // 图片转文本证据
 // ============================================================================
 
-async function convertImagesToEvidence(ctx, messages, config, evidenceCache) {
+// 证据缓存：挂在 config 对象上（配置刷新 = 换新对象 = 缓存自动清空）
+function cacheOf(config) {
+  if (!config.__cache) {
+    Object.defineProperty(config, '__cache', { value: new Map(), enumerable: false })
+  }
+  return config.__cache
+}
+
+async function convertImagesToEvidence(ctx, messages, config) {
   const converted = []
+  const cache = cacheOf(config)
 
   for (const message of messages) {
     if (message.role !== 'user' || !Array.isArray(message.content)) {
@@ -480,7 +636,7 @@ async function convertImagesToEvidence(ctx, messages, config, evidenceCache) {
         const imageKey = block.attachment?.path || block.image_url?.url || ''
 
         // 检查缓存
-        let evidence = evidenceCache.get(imageKey)
+        let evidence = cache.get(imageKey)
         if (!evidence) {
           try {
             const imageUrl = block.attachment
@@ -490,7 +646,8 @@ async function convertImagesToEvidence(ctx, messages, config, evidenceCache) {
             if (imageUrl) {
               const prompt = '请用中文详细描述这张图片的内容，包括文字、布局和语义信息。返回结构化 JSON。'
               evidence = await callVisionApi(config, [imageUrl], prompt)
-              evidenceCache.set(imageKey, evidence)
+              if (cache.size > 64) cache.clear()
+              cache.set(imageKey, evidence)
             }
           } catch (error) {
             console.error(`[dsh-vision-bridge] 图片转换失败: ${error}`)
@@ -524,7 +681,7 @@ async function convertImagesToEvidence(ctx, messages, config, evidenceCache) {
 }
 
 // ============================================================================
-// Web 路由：粘贴上传和 Verdict 判断
+// Web 路由：粘贴上传与 Verdict 判断
 // ============================================================================
 
 // 图片魔数检测
@@ -538,8 +695,32 @@ const PASTE_SNIFFS = [
   { ext: '.webp', test: (b) => b.length >= 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP' },
 ]
 const PASTE_MAX_BYTES = 25 * 1024 * 1024
+const JSON_MAX_BYTES = 1 << 20
 
-function registerPasteRoute(ctx, config, ownProviders) {
+// 同源防护：跨站请求拒绝写操作
+function sameOrigin(req) {
+  const site = req.headers?.['sec-fetch-site']
+  return site === undefined || site === 'same-origin' || site === 'none'
+}
+
+function sendJson(res, status, payload) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(payload))
+}
+
+async function readJsonBody(req) {
+  const chunks = []
+  let total = 0
+  for await (const chunk of req) {
+    total += chunk.length
+    if (total > JSON_MAX_BYTES) throw new Error('请求体过大')
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+}
+
+function registerPasteRoute(ctx, state) {
   if (!ctx.webServer?.register) return
 
   ctx.webServer.register({
@@ -558,8 +739,7 @@ function registerPasteRoute(ctx, config, ownProviders) {
         for await (const chunk of req) {
           total += chunk.length
           if (total > PASTE_MAX_BYTES) {
-            res.writeHead(413, { 'content-type': 'application/json' })
-            res.end(JSON.stringify({ error: `Image over ${PASTE_MAX_BYTES}-byte limit` }))
+            sendJson(res, 413, { error: `Image over ${PASTE_MAX_BYTES}-byte limit` })
             req.destroy()
             return
           }
@@ -569,8 +749,7 @@ function registerPasteRoute(ctx, config, ownProviders) {
         const buffer = Buffer.concat(chunks)
         const sniff = PASTE_SNIFFS.find((s) => s.test(buffer))
         if (!sniff) {
-          res.writeHead(400, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Not a recognized image (png/jpeg/gif/webp)' }))
+          sendJson(res, 400, { error: 'Not a recognized image (png/jpeg/gif/webp)' })
           return
         }
 
@@ -586,17 +765,15 @@ function registerPasteRoute(ctx, config, ownProviders) {
         const file = join(dir, `paste${sniff.ext}`)
         await writeFile(file, buffer, { mode: 0o600 })
 
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ path: file }))
+        sendJson(res, 200, { path: file })
       } catch (error) {
-        res.writeHead(500, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: String(error?.message || error) }))
+        sendJson(res, 500, { error: String(error?.message || error) })
       }
     },
   })
 }
 
-function registerVerdictRoute(ctx, ownProviders) {
+function registerVerdictRoute(ctx, state) {
   if (!ctx.webServer?.register) return
 
   ctx.webServer.register({
@@ -613,18 +790,22 @@ function registerVerdictRoute(ctx, ownProviders) {
         const url = new URL(req.url, 'http://localhost')
         const label = url.searchParams.get('model') || ''
 
+        // 插件停用时不接管粘贴
+        if (!state.config?.enabled) {
+          sendJson(res, 200, { takeover: false })
+          return
+        }
+
         // 检查是否是 wrapper provider 自己
         if (/\(vision bridge\)/i.test(label)) {
-          res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ takeover: false }))
+          sendJson(res, 200, { takeover: false })
           return
         }
 
         // 检查模型是否支持图片
         const llm = ctx.llm
         if (!llm || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
-          res.writeHead(200, { 'content-type': 'application/json' })
-          res.end(JSON.stringify({ takeover: false }))
+          sendJson(res, 200, { takeover: false })
           return
         }
 
@@ -633,7 +814,7 @@ function registerVerdictRoute(ctx, ownProviders) {
 
         for (const info of llm.listProviders()) {
           const providerId = typeof info === 'string' ? info : info?.id
-          if (!providerId || ownProviders?.has(providerId)) continue
+          if (!providerId || providerId === 'vision-bridge') continue
 
           let models = []
           try {
@@ -650,8 +831,7 @@ function registerVerdictRoute(ctx, ownProviders) {
               const modalities = model?.inputModalities
               if (!Array.isArray(modalities) || modalities.includes('image')) {
                 // 模型支持图片，不需要接管
-                res.writeHead(200, { 'content-type': 'application/json' })
-                res.end(JSON.stringify({ takeover: false }))
+                sendJson(res, 200, { takeover: false })
                 return
               }
               matchedAny = true
@@ -659,11 +839,192 @@ function registerVerdictRoute(ctx, ownProviders) {
           }
         }
 
-        res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ takeover: matchedAny }))
+        sendJson(res, 200, { takeover: matchedAny })
       } catch (error) {
-        res.writeHead(500, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ error: String(error?.message || error) }))
+        sendJson(res, 500, { error: String(error?.message || error) })
+      }
+    },
+  })
+}
+
+// ============================================================================
+// 可视化配置路由：GET/POST /vision-bridge/config、POST /vision-bridge/test
+// ============================================================================
+
+// 脱敏视图：永不回传 apiKey 原文
+function sanitizedView(state) {
+  const config = state.config ?? resolveSection({})
+  return {
+    enabled: config.enabled,
+    provider: config.provider,
+    baseUrl: config.baseUrl,
+    model: config.model,
+    apiKeyEnv: config.apiKeyEnv,
+    timeout: config.timeout,
+    keySource: config.keySource,
+    keyResolved: Boolean(config.apiKey),
+  }
+}
+
+function statusView(state) {
+  return {
+    providerRegistered: state.providerRegistered,
+    settingsService: Boolean(state.settingsFace),
+    namespace: SETTINGS_NAMESPACE,
+    presets: Object.fromEntries(
+      Object.entries(PROVIDER_PRESETS).map(([id, preset]) => [
+        id,
+        { label: preset.label, baseUrl: preset.baseUrl, model: preset.model, apiKeyEnv: preset.apiKeyEnv },
+      ]),
+    ),
+  }
+}
+
+function currentRevision(state) {
+  try {
+    const face = state.settingsFace
+    if (!face) return undefined
+    const descriptor = face.service.describe({ redactSecrets: true })
+      .find((candidate) => candidate.ns === SETTINGS_NAMESPACE)
+    return descriptor?.revision
+  } catch {
+    return undefined
+  }
+}
+
+function registerConfigRoutes(ctx, state) {
+  if (!ctx.webServer?.register) return
+
+  ctx.webServer.register({
+    name: 'vision-bridge-config',
+    kind: 'exact',
+    path: '/vision-bridge/config',
+    handler: async (req, res) => {
+      if (req.method === 'GET') {
+        sendJson(res, 200, {
+          config: sanitizedView(state),
+          status: statusView(state),
+          revision: currentRevision(state),
+        })
+        return
+      }
+
+      if (req.method !== 'POST') {
+        res.writeHead(405).end()
+        return
+      }
+
+      if (!sameOrigin(req)) {
+        sendJson(res, 403, { error: '跨站请求被拒绝' })
+        return
+      }
+
+      try {
+        const body = await readJsonBody(req)
+        const patch = body?.patch
+        if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+          sendJson(res, 400, { error: 'patch 必须是对象' })
+          return
+        }
+
+        // 只接受白名单字段
+        const allowed = ['enabled', 'provider', 'baseUrl', 'model', 'apiKeyEnv', 'apiKey', 'timeout']
+        const clean = {}
+        for (const key of allowed) {
+          if (patch[key] === undefined) continue
+          if (key === 'enabled') {
+            clean.enabled = Boolean(patch.enabled)
+          } else if (key === 'timeout') {
+            const t = Number(patch.timeout)
+            if (!Number.isFinite(t) || t < 5 || t > 600) {
+              sendJson(res, 400, { error: 'timeout 需在 5–600 秒之间' })
+              return
+            }
+            clean.timeout = t
+          } else if (typeof patch[key] === 'string') {
+            clean[key] = patch[key]
+          }
+        }
+
+        const face = state.settingsFace
+        if (!face) {
+          sendJson(res, 503, {
+            error: `settings 服务不可用：请直接编辑 settings.yaml 的 ${SETTINGS_NAMESPACE} 段`,
+          })
+          return
+        }
+
+        await face.service.update(SETTINGS_NAMESPACE, clean, body.revision)
+        sendJson(res, 200, {
+          config: sanitizedView(state),
+          status: statusView(state),
+          revision: currentRevision(state),
+          message: '已保存并热生效',
+        })
+      } catch (error) {
+        const name = error?.constructor?.name
+        if (name === 'SettingsConflictError') {
+          sendJson(res, 409, {
+            error: '配置已被其他窗口修改，请刷新后重试',
+            revision: currentRevision(state),
+          })
+          return
+        }
+        console.error(`[dsh-vision-bridge] 配置保存失败: ${error?.message ?? error}`)
+        sendJson(res, 400, { error: String(error?.message || error) })
+      }
+    },
+  })
+
+  ctx.webServer.register({
+    name: 'vision-bridge-test',
+    kind: 'exact',
+    path: '/vision-bridge/test',
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(405).end()
+        return
+      }
+      if (!sameOrigin(req)) {
+        sendJson(res, 403, { error: '跨站请求被拒绝' })
+        return
+      }
+
+      const config = state.config
+      if (!config?.apiKey) {
+        sendJson(res, 400, { error: `缺少 API key（${config?.apiKeyEnv || '未配置 apiKeyEnv'}）` })
+        return
+      }
+
+      // 8x8 纯色测试 PNG
+      const png = Buffer.from(
+        'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAAFklEQVR4nGP8z8DwnwEPYMInOXwUAADtmwTD8M0nAAAAAElFTkSuQmCC',
+        'base64',
+      )
+      const dataUrl = `data:image/png;base64,${png.toString('base64')}`
+
+      const started = Date.now()
+      try {
+        const result = await callVisionApi(
+          { ...config, timeoutMs: Math.min(config.timeoutMs, 30_000) },
+          [dataUrl],
+          '这是一张 8x8 纯色测试图。只需回答:ok',
+        )
+        sendJson(res, 200, {
+          ok: true,
+          latencyMs: Date.now() - started,
+          model: config.model,
+          provider: config.provider,
+          sample: typeof result?.summary === 'string' ? result.summary.slice(0, 120) : undefined,
+        })
+      } catch (error) {
+        sendJson(res, 200, {
+          ok: false,
+          latencyMs: Date.now() - started,
+          model: config.model,
+          provider: config.provider,
+          error: String(error?.message || error).slice(0, 500),
+        })
       }
     },
   })
