@@ -1,0 +1,4 @@
+- id: dsh-vision-bridge
+  name: Vision Bridge
+  dsh:
+    bundle: dsh/index.js
