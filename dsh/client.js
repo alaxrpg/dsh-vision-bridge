@@ -2,7 +2,7 @@
 //
 // 两部分职责：
 //  1. 粘贴拦截：当前模型不支持图片时，把粘贴的图片上传到服务端并插入路径文本；
-//  2. 设置页「视觉桥接」分节：可视化编辑 provider/model/key/timeout，
+//  2. 设置页「插件」中的「视觉桥接」可折叠子菜单：可视化编辑 provider/model/key/timeout，
 //     保存即热生效（服务端 settings 服务），并提供连通性测试按钮。
 //
 // 数据通道全部走本插件自己的 web 路由（/vision-bridge/*），不依赖 Typert。
@@ -36,8 +36,20 @@ window.__ModuleLoader__.load({
       const style = document.createElement('style')
       style.id = STYLE_ID
       style.textContent = [
-        '/* dsh-vision-bridge 设置分节 */',
-        '.vb-section{display:flex;flex-direction:column;gap:18px;padding:4px 2px 24px;font-size:13px;color:var(--dsw-alias-label-primary);max-width:760px;width:100%}',
+        '/* dsh-vision-bridge 插件配置子菜单 */',
+        '.vb-card{border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-3);border-radius:12px;transition:border-color .16s,background .16s;overflow:hidden}',
+        '.vb-card:hover{border-color:var(--dsw-alias-label-dimmed)}',
+        '.vb-card.open{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}',
+        '.vb-cardHeader{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:transparent;border:0;align-items:center;gap:12px;padding:14px 16px;display:flex}',
+        '.vb-cardHeader:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:-2px}',
+        '.vb-cardHeadText{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}',
+        '.vb-cardTitle{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}',
+        '.vb-cardSubtitle{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}',
+        '.vb-cardPending{white-space:nowrap;background:var(--dsw-alias-bg-module-platform);color:var(--dsw-alias-label-secondary);border-radius:999px;padding:1px 8px;font-size:11px;line-height:17px}',
+        '.vb-cardChevron{color:var(--dsw-alias-label-tertiary);font-size:18px;line-height:1;transition:transform .16s;transform:rotate(0deg)}',
+        '.vb-card.open .vb-cardChevron{transform:rotate(180deg)}',
+        '.vb-cardBody{border-top:1px solid var(--dsw-alias-border-l2);margin:0 16px;padding:14px 0 16px}',
+        '.vb-section{display:flex;flex-direction:column;gap:18px;font-size:13px;color:var(--dsw-alias-label-primary);width:100%}',
         '.vb-intro{color:var(--dsw-alias-label-tertiary);margin:0;padding:0 2px;font-size:13px;line-height:20px}',
         '.vb-chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 2px}',
         '.vb-chip{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:6px;background:var(--dsw-alias-bg-layer-2);font-size:11px;line-height:22px;color:var(--dsw-alias-label-secondary);white-space:nowrap}',
@@ -47,6 +59,9 @@ window.__ModuleLoader__.load({
         '.vb-row{display:flex;align-items:center;gap:12px;min-width:0}',
         '.vb-row.col{flex-direction:column;align-items:stretch;gap:6px}',
         '.vb-label{flex:none;width:110px;color:var(--dsw-alias-label-secondary);font-size:13px}',
+        '.vb-field{display:grid;grid-template-columns:minmax(118px,150px) minmax(0,1fr);align-items:start;gap:12px;min-width:0}',
+        '.vb-field>.vb-label{width:auto;padding-top:6px;font-weight:500}',
+        '.vb-control{display:flex;flex-direction:column;gap:6px;min-width:0}',
         '.vb-input{box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-1);width:100%;min-width:0;color:var(--dsw-alias-label-primary);font:inherit;border-radius:8px;padding:5px 10px;font-size:13px;line-height:20px}',
         '.vb-input:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary);outline-offset:1px}',
         '.vb-input.short{width:90px;flex:none}',
@@ -127,7 +142,23 @@ window.__ModuleLoader__.load({
         const body = await response.json().catch(() => ({}))
         throw new Error(body.error || `Upload failed (${response.status})`)
       }
-      return response.json()
+      const body = await response.json()
+      let id = typeof body.id === 'string' ? body.id : ''
+      if (!id) {
+        const legacyLocation = typeof body.ref === 'string'
+          ? body.ref
+          : typeof body.path === 'string' ? body.path : ''
+        id = /paste-([A-Za-z0-9_-]{6,32})(?:\/|$)/.exec(legacyLocation)?.[1] ?? ''
+      }
+      if (!/^[A-Za-z0-9_-]{6,32}$/.test(id)) {
+        throw new Error('上传服务版本不一致，请完整重启 DSH')
+      }
+      return { ...body, id }
+    }
+
+    // 用单色符号和中文括号表示图片：不使用 Emoji，也不用会被转义的前导空格。
+    function attachmentReference(id) {
+      return `「▧ 图片 #${id}」`
     }
 
     // 获取当前模型标签
@@ -141,25 +172,97 @@ window.__ModuleLoader__.load({
     }
 
     // 判断是否需要接管粘贴（模型不支持图片时），带 60s 缓存
+    // 返回值：true=接管 | false=模型原生支持图片 | undefined=无法判断
     const verdicts = new Map()
+    const verdictRequests = new Map()
+
+    // 粘贴监听必须在同步阶段知道开关状态，否则无法安全地决定是否
+    // preventDefault。配置不可读时采用 fail-closed：让宿主原生粘贴继续工作。
+    let pasteEnabled = false
+    let pasteConfigReady = false
+    let pasteConfigRequest = null
+
+    async function refreshPasteState() {
+      if (pasteConfigRequest) return pasteConfigRequest
+      pasteConfigRequest = fetch(CONFIG_ROUTE)
+        .then((response) => {
+          if (!response.ok) throw new Error(`config status ${response.status}`)
+          return response.json()
+        })
+        .then((data) => {
+          pasteEnabled = data?.config?.enabled === true
+          pasteConfigReady = true
+          prefetchCurrentVerdict()
+          return pasteEnabled
+        })
+        .catch(() => false)
+        .finally(() => { pasteConfigRequest = null })
+      return pasteConfigRequest
+    }
+
+    // 外部修改最多 5 秒同步到粘贴门控；保存按钮成功后会立即更新。
+    void refreshPasteState()
+    if (typeof window.setInterval === 'function') {
+      window.setInterval(refreshPasteState, 5000)
+    }
+
+    function setPasteEnabled(enabled) {
+      pasteEnabled = enabled === true
+      pasteConfigReady = true
+      prefetchCurrentVerdict()
+    }
+
+    function cachedTakeover(label) {
+      const cached = verdicts.get(label)
+      if (!cached) return undefined
+      if (Date.now() - cached.at >= VERDICT_MAX_AGE_MS) {
+        verdicts.delete(label)
+        return undefined
+      }
+      return cached.takeover
+    }
+
+    // 在模型选择完成时预取结果。粘贴事件不能等待网络请求，否则无法
+    // 既接管纯文本模型又不破坏原生多模态粘贴；因此首次粘贴前必须预热。
+    function prefetchCurrentVerdict() {
+      if (!pasteEnabled) return
+      const label = currentModelLabel()
+      if (label && cachedTakeover(label) === undefined) void shouldTakeover(label)
+    }
+
+    function observeModelSelection() {
+      const Observer = window.MutationObserver
+      if (typeof Observer !== 'function' || !document.documentElement) return
+      const observer = new Observer(() => prefetchCurrentVerdict())
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['aria-label'],
+      })
+      prefetchCurrentVerdict()
+    }
 
     async function shouldTakeover(label) {
-      if (!label) return false
+      if (!label) return undefined
 
-      const cached = verdicts.get(label)
-      if (cached && Date.now() - cached.at < VERDICT_MAX_AGE_MS) {
-        return cached.takeover
-      }
+      const cached = cachedTakeover(label)
+      if (cached !== undefined) return cached
 
-      try {
-        const response = await fetch(`${VERDICT_ROUTE}?model=${encodeURIComponent(label)}`)
-        if (!response.ok) return false
-        const { takeover } = await response.json()
-        verdicts.set(label, { takeover, at: Date.now() })
-        return takeover
-      } catch {
-        return false
-      }
+      const pending = verdictRequests.get(label)
+      if (pending) return pending
+
+      const request = fetch(`${VERDICT_ROUTE}?model=${encodeURIComponent(label)}`)
+        .then(async (response) => {
+          if (!response.ok) return undefined
+          const { takeover } = await response.json()
+          verdicts.set(label, { takeover, at: Date.now() })
+          return takeover
+        })
+        .catch(() => undefined)
+        .finally(() => verdictRequests.delete(label))
+      verdictRequests.set(label, request)
+      return request
     }
 
     // 粘贴事件处理
@@ -167,22 +270,28 @@ window.__ModuleLoader__.load({
       const files = imageFilesOf(event)
       if (files.length === 0) return
 
-      const label = currentModelLabel()
-      const takeover = await shouldTakeover(label)
-      if (!takeover) return
+      // 关闭桥接或配置尚未加载时，绝不能取消宿主原生粘贴事件。
+      if (!pasteConfigReady || !pasteEnabled) return
 
-      // 阻止默认粘贴行为
+      const label = currentModelLabel()
+      const cached = label ? cachedTakeover(label) : undefined
+      if (cached !== true) {
+        // 异步判定无法追回已经传播的事件；先放行本次粘贴，结果缓存后
+        // 下一次再接管。这样原生多模态模型不会被“放回剪贴板”破坏。
+        void shouldTakeover(label)
+        return
+      }
+
+      // 只有已确认需要桥接时才同步抢占，避免破坏原生多模态粘贴。
       event.preventDefault()
       event.stopPropagation()
 
-      // 上传每张图片
       for (const file of files) {
         try {
-          const { path } = await uploadImage(file)
-          const text = `[图片附件] 路径：${path}`
+          const { id } = await uploadImage(file)
+          const text = attachmentReference(id)
           insertText(event.target, text)
         } catch (error) {
-          console.error('[dsh-vision-bridge] 图片上传失败:', error)
           insertText(event.target, `[图片上传失败: ${error.message}]`)
         }
       }
@@ -190,6 +299,7 @@ window.__ModuleLoader__.load({
 
     // 注册粘贴监听（捕获阶段，优先于其他处理器）
     document.addEventListener('paste', handlePaste, { capture: true })
+    observeModelSelection()
 
     // ─────────────────────────────────────────────────────────────────────
     // 第二部分：设置页「视觉桥接」分节
@@ -227,24 +337,49 @@ window.__ModuleLoader__.load({
 
     // 字段行：label + 控件
     function Field(props) {
-      return el('div', { className: 'vb-row' },
+      // 当前 bundle 使用 Field({ label }, child) 调用；同时兼容标准
+      // props.children，避免控件因额外函数参数被静默丢弃。
+      const rest = Array.prototype.slice.call(arguments, 1)
+      const content = props.children !== undefined
+        ? (Array.isArray(props.children) ? props.children : [props.children])
+        : rest
+      return el('div', { className: 'vb-field' },
         el('div', { className: 'vb-label' }, props.label),
-        props.children)
+        el('div', { className: 'vb-control' }, ...content))
     }
 
     // 主分节组件
     function VisionBridgeSection() {
+      const [open, setOpen] = useState(false)
       const [loading, setLoading] = useState(true)
       const [loadError, setLoadError] = useState(null)
       const [draft, setDraft] = useState(null)     // 编辑中的表单
       const [saved, setSaved] = useState(null)     // 服务端已保存的 config
-      const [status, setStatus] = useState(null)   // 服务端 status（presets 等）
+      const [status, setStatus] = useState(null)   // 服务端 status（DSH Provider 目录等）
       const [revision, setRevision] = useState(undefined)
       const [saving, setSaving] = useState(false)
       const [testing, setTesting] = useState(false)
       const [message, setMessage] = useState(null)   // { kind: 'ok'|'bad'|'info', text }
       const [testResult, setTestResult] = useState(null)
       const [apiKeyInput, setApiKeyInput] = useState('')
+      const [clearApiKey, setClearApiKey] = useState(false)
+
+      const submenu = useCallback((body, hasPendingChanges = false) => el('div', {
+        className: open ? 'vb-card open' : 'vb-card',
+      },
+      el('button', {
+        type: 'button',
+        className: 'vb-cardHeader',
+        'aria-expanded': open,
+        'aria-label': `${open ? '收起' : '展开'}：视觉桥接`,
+        onClick: () => setOpen((value) => !value),
+      },
+      el('span', { className: 'vb-cardHeadText' },
+        el('span', { className: 'vb-cardTitle' }, '视觉桥接'),
+        el('span', { className: 'vb-cardSubtitle' }, '为纯文本模型桥接 DSH 视觉 Provider')),
+      hasPendingChanges ? el('span', { className: 'vb-cardPending' }, '未保存') : null,
+      el('span', { className: 'vb-cardChevron', 'aria-hidden': 'true' }, '⌄')),
+      open ? el('div', { className: 'vb-cardBody' }, body) : null), [open])
 
       useEffect(() => {
         ensureStyle()
@@ -255,8 +390,10 @@ window.__ModuleLoader__.load({
             setSaved(data.config)
             setStatus(data.status)
             setRevision(data.revision)
+            setPasteEnabled(data.config?.enabled)
             setDraft({
               enabled: data.config.enabled,
+              providerMode: data.config.providerMode,
               provider: data.config.provider,
               baseUrl: data.config.baseUrl,
               model: data.config.model,
@@ -277,39 +414,45 @@ window.__ModuleLoader__.load({
         setDraft((prev) => ({ ...prev, [key]: value }))
       }, [])
 
-      const presets = status?.presets ?? {}
-      const presetIds = useMemo(
-        () => Object.keys(presets).filter((id) => id !== 'custom'),
-        [status],
-      )
-      const isPreset = draft?.provider != null && presets[draft.provider] !== undefined
+      const dshProviders = status?.dshProviders ?? []
+      const selectedDshProvider = dshProviders.find((provider) => provider.id === draft?.provider)
 
-      // 切换预设：baseUrl/model/apiKeyEnv 跟随预设缺省
-      const onProviderChange = useCallback((next) => {
-        setDraft((prev) => {
-          if (next === 'custom') return { ...prev, provider: 'custom' }
-          const preset = presets[next]
-          if (!preset) return { ...prev, provider: next }
-          return {
-            ...prev,
-            provider: next,
-            baseUrl: preset.baseUrl,
-            model: preset.model,
-            apiKeyEnv: preset.apiKeyEnv,
-          }
-        })
-      }, [presets])
+      const onDshProviderChange = useCallback((providerId) => {
+        const provider = dshProviders.find((item) => item.id === providerId)
+        const firstImageModel = provider?.models?.find((model) => model.imageCapable) ?? provider?.models?.[0]
+        setDraft((prev) => ({
+          ...prev,
+          providerMode: 'dsh',
+          provider: providerId,
+          model: firstImageModel?.id ?? '',
+        }))
+      }, [dshProviders])
+
+      const useCustomProvider = useCallback(() => {
+        setDraft((prev) => ({
+          ...prev,
+          providerMode: 'custom',
+          provider: '',
+          baseUrl: '',
+          model: '',
+          apiKeyEnv: '',
+        }))
+        setApiKeyInput('')
+        setClearApiKey(true)
+      }, [])
 
       const dirty = useMemo(() => {
         if (!draft || !saved) return false
         return draft.enabled !== saved.enabled
+          || draft.providerMode !== saved.providerMode
           || draft.provider !== saved.provider
           || draft.baseUrl !== saved.baseUrl
           || draft.model !== saved.model
           || draft.apiKeyEnv !== saved.apiKeyEnv
           || Number(draft.timeout) !== saved.timeout
           || apiKeyInput !== ''
-      }, [draft, saved, apiKeyInput])
+          || clearApiKey
+      }, [draft, saved, apiKeyInput, clearApiKey])
 
       const doSave = useCallback(async () => {
         if (saving) return
@@ -318,6 +461,7 @@ window.__ModuleLoader__.load({
         try {
           const patch = {
             enabled: draft.enabled,
+            providerMode: draft.providerMode,
             provider: draft.provider,
             baseUrl: draft.baseUrl.trim(),
             model: draft.model.trim(),
@@ -325,11 +469,14 @@ window.__ModuleLoader__.load({
             timeout: Number(draft.timeout) || 90,
           }
           if (apiKeyInput.trim() !== '') patch.apiKey = apiKeyInput.trim()
+          if (clearApiKey && apiKeyInput.trim() === '') patch.clearApiKey = true
           const data = await api.save(patch, revision)
           setSaved(data.config)
           setStatus(data.status)
           setRevision(data.revision)
+          setPasteEnabled(data.config?.enabled)
           setApiKeyInput('')
+          setClearApiKey(false)
           setMessage({ kind: 'ok', text: data.message || '已保存' })
         } catch (error) {
           if (error.conflict) {
@@ -340,7 +487,7 @@ window.__ModuleLoader__.load({
         } finally {
           setSaving(false)
         }
-      }, [draft, apiKeyInput, revision, saving])
+      }, [draft, apiKeyInput, clearApiKey, revision, saving])
 
       const doReload = useCallback(async () => {
         setMessage(null)
@@ -350,8 +497,10 @@ window.__ModuleLoader__.load({
           setSaved(data.config)
           setStatus(data.status)
           setRevision(data.revision)
+          setPasteEnabled(data.config?.enabled)
           setDraft({
             enabled: data.config.enabled,
+            providerMode: data.config.providerMode,
             provider: data.config.provider,
             baseUrl: data.config.baseUrl,
             model: data.config.model,
@@ -359,6 +508,7 @@ window.__ModuleLoader__.load({
             timeout: String(data.config.timeout),
           })
           setApiKeyInput('')
+          setClearApiKey(false)
         } catch (error) {
           setMessage({ kind: 'bad', text: error.message })
         }
@@ -379,26 +529,30 @@ window.__ModuleLoader__.load({
       }, [testing])
 
       if (loading) {
-        return el('div', { className: 'vb-section' }, el('p', { className: 'vb-note' }, '正在加载配置…'))
+        return submenu(el('p', { className: 'vb-note' }, '正在加载配置…'))
       }
 
       if (loadError !== null) {
-        return el('div', { className: 'vb-section' },
+        return submenu(el('div', { className: 'vb-section' },
           el('p', { className: 'vb-msg bad' }, `配置加载失败：${loadError}`),
           el('div', { className: 'vb-buttons' },
-            el('button', { className: 'vb-btn ghost', onClick: doReload }, '重新加载')))
+            el('button', { className: 'vb-btn ghost', onClick: doReload }, '重新加载'))))
       }
 
       if (draft === null || saved === null) {
-        return el('div', { className: 'vb-section' }, el('p', { className: 'vb-note' }, '暂无配置'))
+        return submenu(el('p', { className: 'vb-note' }, '暂无配置'))
       }
 
-      const keyChip = saved.keyResolved
-        ? el('span', {
-            className: 'vb-chip ok',
-            title: saved.keySource === 'env' ? `从环境变量 ${saved.apiKeyEnv} 解析` : '存储于 settings.yaml',
-          }, `● API Key 已就绪（${saved.keySource === 'env' ? saved.apiKeyEnv : 'settings'}）`)
-        : el('span', { className: 'vb-chip bad' }, '● API Key 缺失')
+      const keySourceTitle = saved.keySource === 'credentials'
+        ? `从 DSH 凭据库 ${saved.apiKeyEnv} 解析`
+        : saved.keySource === 'env' ? `从环境变量 ${saved.apiKeyEnv} 解析` : '存储于 settings.yaml'
+      const keySourceText = saved.keySource === 'credentials' || saved.keySource === 'env'
+        ? saved.apiKeyEnv : 'settings'
+      const keyChip = saved.providerMode === 'dsh'
+        ? el('span', { className: 'vb-chip ok' }, '● 凭据由 DSH Provider 管理')
+        : saved.keyResolved
+          ? el('span', { className: 'vb-chip ok', title: keySourceTitle }, `● API Key 已就绪（${keySourceText}）`)
+          : el('span', { className: 'vb-chip bad' }, '● API Key 缺失')
 
       const enabledSwitch = el('div', { className: 'vb-row' },
         el('div', { className: 'vb-label' }, '启用桥接'),
@@ -412,52 +566,76 @@ window.__ModuleLoader__.load({
           el('span', { className: 'vb-switchTrack' },
             el('span', { className: 'vb-switchThumb' }))),
         el('span', { className: 'vb-note' },
-          '停用后不再接管图片粘贴，也不暴露 (vision bridge) 模型'))
+          '停用后不再接管图片粘贴'))
 
-      const providerSelect = el('select', {
-        className: 'vb-input vb-select',
-        value: draft.provider,
-        onChange: (e) => onProviderChange(e.target.value),
-      },
-        presetIds.map((id) => el('option', { key: id, value: id }, presets[id].label ?? id)),
-        el('option', { value: 'custom' }, '自定义（OpenAI 兼容）'))
+      const providerRow = draft.providerMode === 'dsh'
+        ? Field({ label: 'DSH Provider' },
+            el('div', { className: 'vb-buttons' },
+              el('select', {
+                className: 'vb-input vb-select',
+                value: draft.provider,
+                onChange: (e) => onDshProviderChange(e.target.value),
+              },
+                el('option', { value: '' }, dshProviders.length ? '请选择已添加的 Provider' : 'DSH 中暂无可用 Provider'),
+                dshProviders.map((provider) => el('option', { key: provider.id, value: provider.id }, provider.label))),
+              el('button', { type: 'button', className: 'vb-btn ghost', onClick: useCustomProvider }, '新增 Provider')),
+            el('p', { className: 'vb-note' }, '列表实时来自 DSH；Base URL、凭据和调用协议均由 DSH Provider 管理。'))
+        : Field({ label: 'Provider 名称' },
+            el('div', { className: 'vb-buttons' },
+              el('input', {
+                className: 'vb-input',
+                type: 'text',
+                value: draft.provider,
+                placeholder: '自定义 Provider 名称',
+                onChange: (e) => setField('provider', e.target.value),
+              }),
+              el('button', {
+                type: 'button',
+                className: 'vb-btn ghost',
+                onClick: () => setDraft((prev) => ({ ...prev, providerMode: 'dsh', provider: '', model: '' })),
+              }, '使用 DSH Provider')),
+            el('p', { className: 'vb-note' }, '这是本插件私有的 OpenAI 兼容直连配置，不会注册到 DSH 全局 Provider 列表。'))
 
-      const providerRow = Field({ label: 'Provider' },
-        providerSelect,
-        !isPreset && draft.provider !== 'custom'
-          ? el('span', { className: 'vb-mono' }, draft.provider)
-          : null)
-
-      const baseUrlRow = Field({ label: 'Base URL' },
+      const baseUrlRow = draft.providerMode === 'custom' ? Field({ label: 'Base URL' },
         el('input', {
           className: 'vb-input',
           type: 'text',
           value: draft.baseUrl,
           placeholder: 'https://.../v1',
           onChange: (e) => setField('baseUrl', e.target.value),
-        }))
+        })) : null
 
       const modelRow = Field({ label: '视觉模型' },
-        el('input', {
-          className: 'vb-input',
-          type: 'text',
-          value: draft.model,
-          placeholder: 'sensenova-u1-fast',
-          onChange: (e) => setField('model', e.target.value),
-        }))
+        draft.providerMode === 'dsh'
+          ? el('select', {
+              className: 'vb-input vb-select',
+              value: draft.model,
+              disabled: !selectedDshProvider,
+              onChange: (e) => setField('model', e.target.value),
+            },
+              el('option', { value: '' }, selectedDshProvider ? '请选择模型' : '请先选择 Provider'),
+              (selectedDshProvider?.models ?? []).map((model) => el('option', { key: model.id, value: model.id },
+                `${model.label}${model.imageCapable ? ' · 支持图片' : ' · 未声明图片能力'}`)))
+          : el('input', {
+              className: 'vb-input',
+              type: 'text',
+              value: draft.model,
+              placeholder: '视觉模型 ID',
+              onChange: (e) => setField('model', e.target.value),
+            }))
 
-      const apiKeyEnvRow = Field({ label: 'Key 环境变量' },
+      const apiKeyEnvRow = draft.providerMode === 'custom' ? Field({ label: 'Key 环境变量' },
         el('input', {
           className: 'vb-input',
           type: 'text',
           value: draft.apiKeyEnv,
-          placeholder: 'SENSENNOVA_API_KEY',
+          placeholder: 'VISION_API_KEY',
           onChange: (e) => setField('apiKeyEnv', e.target.value),
         }),
         el('p', { className: 'vb-note' },
-          '启动 DSH 的 shell 中 export 该变量即可被读取；或直接在下方填入 Key（存入 settings.yaml）'))
+          '可在 DSH 凭据中配置该变量；或直接在下方填入 Key（存入 settings.yaml）。')) : null
 
-      const apiKeyRow = Field({ label: 'API Key' },
+      const apiKeyRow = draft.providerMode === 'custom' ? Field({ label: 'API Key' },
         el('input', {
           className: 'vb-input',
           type: 'password',
@@ -465,7 +643,7 @@ window.__ModuleLoader__.load({
           placeholder: saved.keyResolved ? '已配置（留空保持不变）' : '未配置，可在此填入',
           onChange: (e) => setApiKeyInput(e.target.value),
           autoComplete: 'new-password',
-        }))
+        })) : null
 
       const timeoutRow = Field({ label: '超时（秒）' },
         el('input', {
@@ -497,15 +675,19 @@ window.__ModuleLoader__.load({
       const noteLine = el('p', { className: 'vb-note' },
         '保存后立即热生效（无需重启）。配置存储于 settings.yaml 的 ',
         el('span', { className: 'vb-mono' }, status?.namespace ?? 'vision-bridge'),
-        ' 段；API Key 永远不会回显到浏览器。')
+        ' 段；自定义 Provider 的 API Key 永远不会回显到浏览器。')
 
       const chipsRow = el('div', { className: 'vb-chips' },
         el('span', { className: `vb-chip ${saved.enabled ? 'ok' : 'bad'}` },
           saved.enabled ? '● 已启用' : '● 已停用'),
         keyChip,
-        status?.providerRegistered
-          ? el('span', { className: 'vb-chip ok' }, '● 桥接 Provider 已注册')
-          : el('span', { className: 'vb-chip' }, '○ 桥接 Provider 未注册'),
+        saved.providerMode === 'dsh'
+          ? status?.llmService && status?.attachmentService
+            ? el('span', { className: 'vb-chip ok' }, '● DSH Provider 通道已连接')
+            : el('span', { className: 'vb-chip bad' }, '● DSH Provider 通道不完整')
+          : status?.credentialsService
+            ? el('span', { className: 'vb-chip ok' }, '● 凭据服务已连接')
+            : el('span', { className: 'vb-chip bad' }, '● 凭据服务不可用'),
         status?.settingsService
           ? el('span', { className: 'vb-chip ok' }, '● 设置服务已连接')
           : el('span', { className: 'vb-chip bad' }, '● 设置服务不可用（只读模式）'),
@@ -525,14 +707,14 @@ window.__ModuleLoader__.load({
         noteLine)
 
       const intro = el('p', { className: 'vb-intro' },
-        '为纯文本模型（DeepSeek / GLM / Qwen / MiMo 等）桥接视觉能力：粘贴图片或调用 ',
+        '为当前纯文本模型桥接视觉能力：选择 DSH 已添加的视觉 Provider，或新增一个 OpenAI 兼容直连 Provider。粘贴图片或调用 ',
         el('span', { className: 'vb-mono' }, 'vision_bridge_read_image'),
         ' 工具时，先由下方多模态模型识别为结构化文本证据，再交给当前模型。')
 
-      return el('div', { className: 'vb-section' },
+      return submenu(el('div', { className: 'vb-section' },
         intro,
         chipsRow,
-        formGroup)
+        formGroup), dirty)
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -549,18 +731,14 @@ window.__ModuleLoader__.load({
 
       ensureStyle()
 
-      slots.inject('settings.section', () => {
+      slots.inject('settings.plugin.item', () => {
         const dispose = slots.register({
-          name: 'settings.section',
-          id: 'vision-bridge',
-          order: 22,
-          label: '视觉桥接',
+          name: 'settings.plugin.item',
+          key: 'vision-bridge',
           inject: () => ({ api }),
         }, VisionBridgeSection)
         return () => dispose()
       })
-
-      console.log('[dsh-vision-bridge] 浏览器端已加载（粘贴拦截 + 设置分节）')
     }
 
     exports.apply = apply

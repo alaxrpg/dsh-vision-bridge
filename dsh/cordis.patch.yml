@@ -10,7 +10,9 @@
 #       - id: vision-bridge
 #         name: dsh-vision-bridge
 #         config:
-#           provider: sensennova
+#           providerMode: dsh
+#           provider: your-dsh-provider-id
+#           model: your-vision-model-id
 #           timeout: 90
 - insert:
     - id: vision-bridge

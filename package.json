@@ -1,7 +1,7 @@
 {
   "name": "dsh-vision-bridge",
-  "version": "0.2.0",
-  "description": "DSH 插件：为纯文本模型提供视觉能力，支持任意 OpenAI 兼容多模态 API，带设置页可视化配置",
+  "version": "0.3.0",
+  "description": "DSH 视觉桥接插件：复用 DSH Provider 或 OpenAI 兼容直连，支持可视化配置与图片粘贴",
   "type": "module",
   "main": "dsh/index.js",
   "exports": {
@@ -20,7 +20,7 @@
   },
   "dsh": {
     "bundle": {
-      "patch": "./cordis.patch.yml"
+      "patch": "./dsh/cordis.patch.yml"
     },
     "client": {
       "platform": "web"
@@ -32,7 +32,6 @@
     "vision",
     "multimodal",
     "image-recognition",
-    "sensenova",
     "openai-compatible"
   ],
   "author": "lizhiyuan",
