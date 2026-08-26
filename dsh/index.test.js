@@ -119,6 +119,31 @@ describe('dsh-vision-bridge server', () => {
     assert.equal(plugin.decidePasteTakeover('my-openai / shared-model', overlappingProviders), true)
   })
 
+  it('should take over when same-name models share the same capability', () => {
+    // 同名模型横跨多个 Provider、但能力完全一致（都不支持图片）时：
+    // 接管与否是确定的，不应因"跨 Provider 同名"而安全放行。
+    const allText = [
+      { providerId: 'opencode-go', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', inputModalities: ['text'] }] },
+      { providerId: 'qwen-token-plan-cn', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', inputModalities: ['text'] }] },
+      { providerId: 'sensennova', models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', inputModalities: ['text'] }] },
+    ]
+    assert.equal(plugin.decidePasteTakeover('DeepSeek V4 Flash', allText), true)
+
+    // 能力同一致但都支持图片：不接管（宿主原生粘贴即可）。
+    const allImage = [
+      { providerId: 'a', models: [{ id: 'shared', inputModalities: ['text', 'image'] }] },
+      { providerId: 'b', models: [{ id: 'shared', inputModalities: ['text', 'image'] }] },
+    ]
+    assert.equal(plugin.decidePasteTakeover('shared', allImage), false)
+
+    // 能力冲突（有的支持图片、有的不支持）时仍放行：归属不明，不误拦截。
+    const mixed = [
+      { providerId: 'a', models: [{ id: 'shared', inputModalities: ['text'] }] },
+      { providerId: 'b', models: [{ id: 'shared', inputModalities: ['text', 'image'] }] },
+    ]
+    assert.equal(plugin.decidePasteTakeover('shared', mixed), false)
+  })
+
   it('should reject bridge operations while disabled', () => {
     assert.match(serverSource, /vision bridge 已停用/)
     assert.match(serverSource, /视觉桥接已停用/)

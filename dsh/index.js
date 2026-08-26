@@ -752,7 +752,14 @@ export function decidePasteTakeover(label, catalogs) {
     : []
   const relevant = explicit.length > 0 ? explicit : matches
   if (relevant.length === 0) return false
-  if (explicit.length === 0 && new Set(relevant.map((match) => match.providerId)).size > 1) return false
+  if (explicit.length === 0) {
+    // 跨 Provider 同名模型：能力归属不明时才放行宿主原生粘贴，避免误拦截。
+    // 若所有同名模型能力一致（如各家的 deepseek-v4-flash 都是纯文本），
+    // 接管与否是确定的，不应因“跨 Provider 同名”而错误放行。
+    const capabilities = new Set(relevant.map((match) => match.imageCapable))
+    if (capabilities.size > 1) return false
+    return !relevant[0].imageCapable
+  }
   return !relevant.some((match) => match.imageCapable)
 }
 

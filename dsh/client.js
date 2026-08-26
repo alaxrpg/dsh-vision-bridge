@@ -163,12 +163,15 @@ window.__ModuleLoader__.load({
       return `「▧ 图片 #${id}」`
     }
 
-    // 获取当前模型标签
+    // 获取当前模型标签。aria-label 形如「选择模型，当前 DeepSeek V4 Flash」
+    // 或「Select model, current …」。只保留模型（可能带 Provider 前缀）部分，
+    // 前缀文案不参与服务端匹配，避免「当前」这类词污染 Provider 判定。
     function currentModelLabel() {
       const buttons = document.querySelectorAll('button[aria-label]')
       for (const button of buttons) {
         const label = button.getAttribute('aria-label') || ''
-        if (/选择模型|select model|current model/i.test(label)) return label
+        const match = /(?:选择模型|select model|current model)\s*[,，:]?\s*(.+)/i.exec(label)
+        if (match) return match[1].trim()
       }
       return ''
     }
