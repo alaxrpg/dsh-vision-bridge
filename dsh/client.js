@@ -69,11 +69,13 @@ window.__ModuleLoader__.load({
         '.vb-note{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px;margin:0}',
         '.vb-mono{font-family:var(--ds-font-family-code,ui-monospace,Menlo,monospace);font-size:11px;color:var(--dsw-alias-label-secondary)}',
         '.vb-buttons{display:flex;align-items:center;gap:8px;flex-wrap:wrap}',
-        '.vb-btn{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-label-primary);color:var(--dsw-alias-bg-layer-3);border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
-        '.vb-btn:hover{background:var(--dsw-alias-interactive-bg-hover-accent,var(--dsw-alias-label-primary))}',
+        '.vb-btn{appearance:none;font:inherit;cursor:pointer;background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-label-primary));color:var(--dsw-alias-label-primary-foreground,var(--dsw-alias-bg-layer-3));border:1px solid transparent;border-radius:8px;padding:5px 14px;font-size:13px;line-height:1.5}',
+        // 实心主按钮 hover 用宿主实色 button-primary-hover；interactive-bg-hover-accent 是
+        // 半透明叠加层（亮色 #ffffff3d），直接当背景会把深色按钮整体“洗白”。
+        '.vb-btn:not(:disabled):hover{background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-label-primary))}',
         '.vb-btn:disabled{opacity:.5;cursor:default}',
         '.vb-btn.ghost{background:transparent;color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-border-l2)}',
-        '.vb-btn.ghost:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
+        '.vb-btn.ghost:not(:disabled):hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}',
         '.vb-msg{font-size:12px;line-height:18px;color:var(--dsw-alias-label-secondary)}',
         '.vb-msg.ok{color:var(--dsw-alias-state-ok-primary,#3ba272)}',
         '.vb-msg.bad{color:var(--dsw-alias-state-error-primary)}',
