@@ -511,7 +511,14 @@ window.__ModuleLoader__.load({
           })
           setApiKeyInput('')
           setClearApiKey(false)
+          // 从「配置加载失败」错误态恢复：不置 null 的话上方
+          // if (loadError !== null) 永远命中错误视图，「重新加载」点了没反应。
+          setLoadError(null)
+          setLoading(false)
+          setMessage({ kind: 'ok', text: '已重新加载' })
         } catch (error) {
+          // 重新加载失败也同步到错误态，保证面板状态与真实加载结果一致。
+          setLoadError(error.message)
           setMessage({ kind: 'bad', text: error.message })
         }
       }, [])
