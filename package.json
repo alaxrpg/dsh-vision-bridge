@@ -1,6 +1,6 @@
 {
   "name": "dsh-vision-bridge",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "DSH 视觉桥接插件：复用 DSH Provider 或 OpenAI 兼容直连，支持可视化配置与图片粘贴",
   "type": "module",
   "main": "dsh/index.js",
@@ -40,9 +40,13 @@
     "node": ">=18.0.0"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/dsh-credentials": ">=0.1.1-rc.1",
+    "@deepseek-ai/schemastery": ">=3.18.1"
   },
   "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-credentials": {
+      "optional": true
+    },
     "@deepseek-ai/schemastery": {
       "optional": true
     }
