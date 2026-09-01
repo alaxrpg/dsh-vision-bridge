@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 
 const serverSource = readFileSync(new URL('./index.js', import.meta.url), 'utf8')
 const clientSource = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
@@ -258,47 +258,6 @@ describe('dsh-vision-bridge client', () => {
     assert.ok(customFlow.includes("apiKeyEnv: ''"))
     assert.ok(customFlow.includes('setClearApiKey(true)'))
     assert.ok(clientSource.includes('patch.clearApiKey = true'))
-  })
-})
-
-describe('dsh-vision-bridge client contenteditable paste', () => {
-  it('should route insertText through contenteditable targets with selection-aware verification', () => {
-    assert.ok(clientSource.includes('el0.isContentEditable !== true'))
-    assert.ok(clientSource.includes('document.getSelection()'))
-    assert.ok(clientSource.includes('selection.isCollapsed !== false'))
-    assert.ok(clientSource.includes('inputType'))
-    // 三态目标解析依赖 document.activeElement，与 bundle 结构耦合过深，
-    // 不提取纯函数，仅做源码结构断言。
-    assert.match(clientSource, /function insertText\(target, text\)[\s\S]*?return false/)
-  })
-
-  it('should fall back to beforeinput/input events when execCommand is swallowed', () => {
-    assert.match(clientSource, /new InputEvent\('beforeinput', \{[\s\S]*?inputType: 'insertText',[\s\S]*?cancelable: true/)
-    assert.match(clientSource, /new InputEvent\('input', \{\s*inputType: 'insertText',\s*data: text,\s*bubbles: true,?\s*\}\)/)
-  })
-
-  it('should insert an explicit failure message when the target cannot be typed into', () => {
-    assert.ok(clientSource.includes('const ok = insertText(event.target, text)'))
-    assert.ok(clientSource.includes("if (!ok) insertText(event.target, '[图片插入失败: 输入框不支持插入]')"))
-    // 既有上传失败分支不受影响
-    assert.ok(clientSource.includes('[图片上传失败: ${error.message}]'))
-  })
-
-  it('should refresh the verdict TTL before expiry', () => {
-    assert.ok(clientSource.includes('const verdictRefreshTimers = new Map()'))
-    assert.match(clientSource, /function scheduleVerdictRefresh\(label\)[\s\S]*?VERDICT_MAX_AGE_MS - 5000/)
-    assert.match(clientSource, /verdicts\.set\(label, \{ takeover, at: Date\.now\(\) \}\)\s*scheduleVerdictRefresh\(label\)/)
-  })
-
-  it('should mirror the DSHLite shell paste algorithm when the shell source is present', () => {
-    // 独立发布环境没有 DSHLite 源码：文件不存在时跳过，不得让测试失败。
-    const swiftPath = new URL('../../DSHLite/Sources/DSHLite/AppKit/MainViewController.swift', import.meta.url)
-    if (!existsSync(swiftPath)) return
-    const shellSource = readFileSync(swiftPath, 'utf8')
-    for (const marker of ['isContentEditable', 'beforeinput', '[图片插入失败: 输入框不支持插入]']) {
-      assert.ok(shellSource.includes(marker), `壳层必须包含统一算法结构 ${marker}`)
-      assert.ok(clientSource.includes(marker), `客户端必须包含统一算法结构 ${marker}`)
-    }
   })
 })
 

@@ -109,71 +109,28 @@ window.__ModuleLoader__.load({
       return files
     }
 
-    // 插入文本到输入框，返回是否确认插入成功
-    // 目标解析：显式传入 TEXTAREA/INPUT 则用之，否则取当前焦点元素。
-    // DSH 0.1.2-alpha 起输入框是 Lexical 受控 contenteditable（activeElement
-    // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT；execCommand 可能
-    // 被编辑器静默吞掉，因此插入后按 textContent 变化验证，失败再退回
-    // beforeinput/input 事件对（Lexical 在编辑器 root 监听这两个事件）。
+    // 插入文本到输入框
     function insertText(target, text) {
       const el0 = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
         ? target
         : document.activeElement
-      if (!el0) return false
-
-      if (el0.tagName === 'TEXTAREA' || el0.tagName === 'INPUT') {
-        el0.focus()
-        let inserted = false
-        try {
-          inserted = document.execCommand('insertText', false, text)
-        } catch {
-          inserted = false
-        }
-        if (!inserted) {
-          const proto = el0.tagName === 'TEXTAREA'
-            ? window.HTMLTextAreaElement.prototype
-            : window.HTMLInputElement.prototype
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
-          setter.call(el0, el0.value + text)
-          el0.dispatchEvent(new Event('input', { bubbles: true }))
-        }
-        return true
-      }
-
-      if (el0.isContentEditable !== true) return false
+      if (!el0 || (el0.tagName !== 'TEXTAREA' && el0.tagName !== 'INPUT')) return
 
       el0.focus()
-      if (document.activeElement !== el0) return false
-
-      // 选区感知验证：execCommand 原生语义是替换非折叠选区，长度差不可靠，
-      // 此时只要求结果包含插入文本；折叠选区才要求长度增量至少为文本长度。
-      // getSelection 不可用时按非折叠宽松处理。
-      const selection = document.getSelection()
-      const collapsed = selection ? selection.isCollapsed !== false : false
-      const before = el0.textContent
+      let inserted = false
       try {
-        document.execCommand('insertText', false, text)
+        inserted = document.execCommand('insertText', false, text)
       } catch {
-        // 被编辑器拦截时由下方验证兜底，转事件退路
+        inserted = false
       }
-      const verify = (after) => after !== before
-        && after.includes(text)
-        && (!collapsed || after.length - before.length >= text.length)
-      if (verify(el0.textContent)) return true
-
-      // 退路：模拟 beforeinput/input 事件对，Lexical 据此接管插入。
-      el0.dispatchEvent(new InputEvent('beforeinput', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-        cancelable: true,
-      }))
-      el0.dispatchEvent(new InputEvent('input', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-      }))
-      return verify(el0.textContent)
+      if (!inserted) {
+        const proto = el0.tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set
+        setter.call(el0, el0.value + text)
+        el0.dispatchEvent(new Event('input', { bubbles: true }))
+      }
     }
 
     // 上传图片到服务端
@@ -223,20 +180,6 @@ window.__ModuleLoader__.load({
     // 返回值：true=接管 | false=模型原生支持图片 | undefined=无法判断
     const verdicts = new Map()
     const verdictRequests = new Map()
-    // verdict 临近过期（提前 5s）时主动续期，避免「60s 过期后首次粘贴」
-    // 的放行窗口；与 5s 的 refreshPasteState 轮询无关（那只刷配置开关）。
-    const verdictRefreshTimers = new Map()
-
-    function scheduleVerdictRefresh(label) {
-      const existing = verdictRefreshTimers.get(label)
-      if (existing) clearTimeout(existing)
-      const timer = setTimeout(() => {
-        verdictRefreshTimers.delete(label)
-        verdicts.delete(label)
-        void shouldTakeover(label)
-      }, VERDICT_MAX_AGE_MS - 5000)
-      verdictRefreshTimers.set(label, timer)
-    }
 
     // 粘贴监听必须在同步阶段知道开关状态，否则无法安全地决定是否
     // preventDefault。配置不可读时采用 fail-closed：让宿主原生粘贴继续工作。
@@ -319,7 +262,6 @@ window.__ModuleLoader__.load({
           if (!response.ok) return undefined
           const { takeover } = await response.json()
           verdicts.set(label, { takeover, at: Date.now() })
-          scheduleVerdictRefresh(label)
           return takeover
         })
         .catch(() => undefined)
@@ -353,8 +295,7 @@ window.__ModuleLoader__.load({
         try {
           const { id } = await uploadImage(file)
           const text = attachmentReference(id)
-          const ok = insertText(event.target, text)
-          if (!ok) insertText(event.target, '[图片插入失败: 输入框不支持插入]')
+          insertText(event.target, text)
         } catch (error) {
           insertText(event.target, `[图片上传失败: ${error.message}]`)
         }

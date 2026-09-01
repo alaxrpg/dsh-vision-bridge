@@ -5,7 +5,7 @@ DSH 插件：为纯文本模型提供视觉能力，复用 DSH 已添加的 Prov
 ## 功能
 
 - 提供 `vision_bridge_read_image` 工具：手动触发图片识别，返回结构化文本证据（OCR + 布局 + 语义）
-- 粘贴图片时自动接管：上传图片并插入紧凑的一图一 ID 引用（例如 `「▧ 图片 #KdAy1D」`）
+- 粘贴图片时自动接管：上传图片并插入紧凑的一图一 ID 引用（例如 `「▧ 图片 #KdAy1D」`），支持 TEXTAREA/INPUT 与 contenteditable（DSH 0.1.2-alpha+）输入框
 - **无厂商硬编码**：Provider 与模型列表实时读取 DSH registry
 - **设置页「插件 → 视觉桥接」子菜单**：选择 DSH Provider，或新增自定义 Provider，保存即热生效
 - **连通性测试**：一键向视觉 API 发送测试图，返回延迟与响应样本
