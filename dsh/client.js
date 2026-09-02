@@ -112,19 +112,15 @@ window.__ModuleLoader__.load({
     // 插入文本到输入框，返回是否确认插入成功（Promise）
     // 目标解析：显式传入 TEXTAREA/INPUT 则用之，否则取当前焦点元素。
     // DSH 0.1.2-alpha 起输入框是 Lexical 受控 contenteditable（activeElement
-    // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT。插入按退路链
-    // 逐级尝试：
-    //   1. execCommand('insertText')——Chromium 下触发受信 beforeinput；
-    //   2. 合成 beforeinput/input 事件对（Lexical 在编辑器 root 监听）；
-    //   3. 重放仅含 text/plain 的合成 paste 事件，借用宿主自己的粘贴管道
-    //      （Lexical paste 命令 → getData('text/plain') → pasteText）。
-    // 第 3 级是 WKWebView（DSH Lite 等 WebKit 外壳）的关键退路：WebKit 的
-    // Lexical 分支会跳过合成 beforeinput 的 insertText 处理，前两级全部
-    // 静默失效；宿主 paste 管道不检查 isTrusted，且重放事件无 file 项，
-    // 本插件自身的 handlePaste 不会递归接管。第 1/2 级直改 DOM、形态可
-    // 断言，用严格 verify（includes+长度增量）；第 3 级的交付验证只看
-    // textContent 变化——宿主 detect-projection 会把「▧ 图片 #id」引用
-    // 投影成 chip，逐字符断言会误判（详见该级注释）。
+    // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT。contenteditable
+    // 分支按「串行尝试 + 异步确认」框架走四级写入路径：
+    //   1. execCommand('insertText')——触发受信 beforeinput；
+    //   2. 合成 beforeinput（Lexical 在编辑器 root 监听接管）；
+    //   3. 合成 input（Lexical 另有 dispatchCommand 处理链，独立一级）；
+    //   4. 重放仅含 text/plain 的合成 paste，借宿主自己的粘贴管道
+    //      （paste 命令 → getData('text/plain') → pasteText）。
+    // 每级只看「textContent 相对快照变化且 50ms 后保持」，确认即终止，
+    // 物理上保证一次调用只发生一次有效写入（详见框架注释）。
     async function insertText(target, text) {
       const el0 = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
         ? target
@@ -155,47 +151,64 @@ window.__ModuleLoader__.load({
       el0.focus()
       if (document.activeElement !== el0) return false
 
-      // 选区感知验证：execCommand 原生语义是替换非折叠选区，长度差不可靠，
-      // 此时只要求结果包含插入文本；折叠选区才要求长度增量至少为文本长度。
-      // getSelection 不可用时按非折叠宽松处理。
-      const selection = document.getSelection()
-      const collapsed = selection ? selection.isCollapsed !== false : false
+      // 串行尝试 + 异步确认的插入框架。
+      //
+      // 背景教训（v0.3.7/v0.3.8 实测）：
+      // 1. 不能用逐字符断言（includes/长度增量）验证插入——宿主
+      //    detect-projection 会把「▧ 图片 #id」引用投影成 chip 节点，
+      //    textContent 混入 U+E100-E11D/U+FFFC 等不可见占位字符，视觉
+      //    完整但逐字符匹配失败，会把成功误判为失败；
+      // 2. 不能在某级「验证失败」后径直走下一级——WKWebView 里
+      //    execCommand、合成 beforeinput、合成 input、paste 重放全都
+      //    能驱动 Lexical 写入，误判失败会导致重复插入（一次粘贴出现
+      //    四条相同引用）。
+      //
+      // 因此每级尝试只做一件事：执行写入动作，textContent 相对初始
+      // 快照发生变化且 50ms 后仍然保持（防 Lexical 受控模式对外部 DOM
+      // 写入的异步回滚），才算该级成功并立即终止；否则继续下一级。
+      // 每级最多写入一次，全链最多发生一次有效写入。
       const before = el0.textContent
-      try {
-        document.execCommand('insertText', false, text)
-      } catch {
-        // 被编辑器拦截时由下方验证兜底，转事件退路
+
+      const attempt = async (write) => {
+        try {
+          write()
+        } catch {
+          return false
+        }
+        if (el0.textContent === before) return false
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        return el0.textContent !== before
       }
-      const verify = (after) => after !== before
-        && after.includes(text)
-        && (!collapsed || after.length - before.length >= text.length)
-      if (verify(el0.textContent)) return true
 
-      // 退路一：模拟 beforeinput/input 事件对，Lexical 据此接管插入。
-      el0.dispatchEvent(new InputEvent('beforeinput', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-        cancelable: true,
-      }))
-      el0.dispatchEvent(new InputEvent('input', {
-        inputType: 'insertText',
-        data: text,
-        bubbles: true,
-      }))
-      if (verify(el0.textContent)) return true
+      // 级别一：execCommand——Chromium/Safari 下触发受信 beforeinput。
+      if (await attempt(() => {
+        document.execCommand('insertText', false, text)
+      })) return true
 
-      // 退路二：重放纯文本 paste 事件，走宿主 Lexical 自己的粘贴管道。
-      // WKWebView 下这是唯一可靠路径；Lexical 的 paste 命令同步执行，
-      // 但 DOM reconcile 可能在微任务批次后落盘，故再做一次延迟复核。
-      // 交付验证只用「textContent 发生变化」：宿主对进入文档的文本做
-      // detect-projection——本插件的「▧ 图片 #id」引用格式会被投影成
-      // chip 节点，textContent 里混入 U+E100-E11D/U+FFFC 等不可见占位
-      // 字符，逐字符断言（includes/长度增量）会把成功插入误判为失败，
-      // 进而在输入框补插多余的「图片插入失败」提示。合成 paste 无原生
-      // 默认行为，textContent 的变化只能来自宿主管线的写入。
-      let delivered = false
-      try {
+      // 级别二：合成 beforeinput，Lexical 在编辑器 root 监听并接管。
+      if (await attempt(() => {
+        el0.dispatchEvent(new InputEvent('beforeinput', {
+          inputType: 'insertText',
+          data: text,
+          bubbles: true,
+          cancelable: true,
+        }))
+      })) return true
+
+      // 级别三：合成 input（独立一级——Lexical 对 input 事件另有
+      // dispatchCommand 处理链，与 beforeinput 配对发送会双写）。
+      if (await attempt(() => {
+        el0.dispatchEvent(new InputEvent('input', {
+          inputType: 'insertText',
+          data: text,
+          bubbles: true,
+        }))
+      })) return true
+
+      // 级别四：重放纯文本 paste，走宿主自己的粘贴管道（paste 命令 →
+      // getData('text/plain') → pasteText）。合成 paste 无原生默认行为、
+      // 无 file 项，本插件自身的 handlePaste 不会递归接管。
+      if (await attempt(() => {
         const transfer = new DataTransfer()
         transfer.setData('text/plain', text)
         el0.dispatchEvent(new ClipboardEvent('paste', {
@@ -203,13 +216,9 @@ window.__ModuleLoader__.load({
           bubbles: true,
           cancelable: true,
         }))
-        delivered = el0.textContent !== before
-      } catch {
-        // ClipboardEvent 构造不可用（老 WebKit）时放弃本退路
-      }
-      if (delivered) return true
-      await new Promise((resolve) => setTimeout(resolve, 50))
-      return el0.textContent !== before
+      })) return true
+
+      return false
     }
 
     // 上传图片到服务端

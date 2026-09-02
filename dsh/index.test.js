@@ -262,13 +262,13 @@ describe('dsh-vision-bridge client', () => {
 })
 
 describe('dsh-vision-bridge client contenteditable paste', () => {
-  it('should route insertText through contenteditable targets with selection-aware verification', () => {
+  it('should route insertText through contenteditable targets', () => {
     assert.ok(clientSource.includes('el0.isContentEditable !== true'))
-    assert.ok(clientSource.includes('document.getSelection()'))
-    assert.ok(clientSource.includes('selection.isCollapsed !== false'))
     assert.ok(clientSource.includes('inputType'))
     // 三态目标解析依赖 document.activeElement，与 bundle 结构耦合过深，
-    // 不提取纯函数，仅做源码结构断言。
+    // 不提取纯函数，仅做源码结构断言。选区感知的逐字符验证已被
+    // 「串行尝试 + textContent 变化确认」框架取代（chip 投影与多级
+    // 双写教训），不再断言 selection 细节。
     assert.match(clientSource, /function insertText\(target, text\)[\s\S]*?return false/)
   })
 
@@ -284,22 +284,20 @@ describe('dsh-vision-bridge client contenteditable paste', () => {
     assert.ok(clientSource.includes('[图片上传失败: ${error.message}]'))
   })
 
-  it('should replay a plain-text paste as the WebKit fallback insertion path', () => {
-    // WKWebView（DSH Lite 等 WebKit 外壳）下 execCommand 与合成 beforeinput
-    // 均被宿主 Lexical 跳过，必须保留重放纯文本 paste 的第三级退路。
-    assert.ok(clientSource.includes('async function insertText'))
+  it('should replay a plain-text paste as the final insertion fallback', () => {
     assert.match(clientSource, /new ClipboardEvent\('paste', \{\s*clipboardData: transfer/)
     assert.ok(clientSource.includes("transfer.setData('text/plain', text)"))
   })
 
-  it('should verify the paste-replay fallback by textContent change, not literal match', () => {
-    // 宿主 detect-projection 会把「▧ 图片 #id」引用投影成 chip，textContent
-    // 混入不可见占位字符，逐字符 includes/长度断言会把成功插入误判为失败，
-    // 进而在输入框补插多余的「图片插入失败」提示（v0.3.7 实测回归）。
-    assert.match(clientSource, /delivered = el0\.textContent !== before/)
-    assert.match(clientSource, /return el0\.textContent !== before/)
-    // 严格 verify 仍只服务直改 DOM 的前两级退路
-    assert.match(clientSource, /const verify = \(after\) => after !== before[\s\S]*?after\.includes\(text\)/)
+  it('should serialise insertion attempts with async confirmation to prevent double writes', () => {
+    // v0.3.8 实测回归：四级写入路径（execCommand/合成 beforeinput/合成
+    // input/paste 重放）在 WKWebView 里全都生效，任一级"验证失败就继续"
+    // 会造成一次粘贴出现四条相同引用。必须串行尝试且每级确认即终止。
+    assert.ok(clientSource.includes('async function insertText'))
+    assert.match(clientSource, /const attempt = async \(write\) => \{[\s\S]*?setTimeout\(resolve, 50\)/)
+    assert.match(clientSource, /if \(await attempt\(/)
+    // 逐字符 includes 断言不得复辟（chip 投影会误判）
+    assert.ok(!clientSource.includes('after.includes(text)'))
   })
 
   it('should refresh the verdict TTL before expiry', () => {
@@ -308,14 +306,15 @@ describe('dsh-vision-bridge client contenteditable paste', () => {
     assert.match(clientSource, /verdicts\.set\(label, \{ takeover, at: Date\.now\(\) \}\)\s*scheduleVerdictRefresh\(label\)/)
   })
 
-  it('should mirror the DSHLite shell paste algorithm when the shell source is present', () => {
+  it('should keep paste handling solely in the plugin client when the shell source is present', () => {
+    // 2026-09-02 起壳层（DSHLite）删除了自己的粘贴算法，粘贴职责统一
+    // 到本插件 client；壳层不得重新引入粘贴拦截（双实现会双写）。
     // 独立发布环境没有 DSHLite 源码：文件不存在时跳过，不得让测试失败。
     const swiftPath = new URL('../../DSHLite/Sources/DSHLite/AppKit/MainViewController.swift', import.meta.url)
     if (!existsSync(swiftPath)) return
     const shellSource = readFileSync(swiftPath, 'utf8')
-    for (const marker of ['isContentEditable', 'beforeinput', '[图片插入失败: 输入框不支持插入]']) {
-      assert.ok(shellSource.includes(marker), `壳层必须包含统一算法结构 ${marker}`)
-      assert.ok(clientSource.includes(marker), `客户端必须包含统一算法结构 ${marker}`)
+    for (const marker of ['isContentEditable', 'beforeinput', 'execCommand']) {
+      assert.ok(!shellSource.includes(marker), `壳层不得包含粘贴算法残留 ${marker}`)
     }
   })
 })
