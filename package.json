@@ -1,6 +1,6 @@
 {
   "name": "dsh-vision-bridge",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "DSH 视觉桥接插件：复用 DSH Provider 或 OpenAI 兼容直连，支持可视化配置与图片粘贴",
   "type": "module",
   "main": "dsh/index.js",

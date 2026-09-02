@@ -109,13 +109,20 @@ window.__ModuleLoader__.load({
       return files
     }
 
-    // 插入文本到输入框，返回是否确认插入成功
+    // 插入文本到输入框，返回是否确认插入成功（Promise）
     // 目标解析：显式传入 TEXTAREA/INPUT 则用之，否则取当前焦点元素。
     // DSH 0.1.2-alpha 起输入框是 Lexical 受控 contenteditable（activeElement
-    // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT；execCommand 可能
-    // 被编辑器静默吞掉，因此插入后按 textContent 变化验证，失败再退回
-    // beforeinput/input 事件对（Lexical 在编辑器 root 监听这两个事件）。
-    function insertText(target, text) {
+    // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT。插入按退路链
+    // 逐级尝试，每级都用 textContent 变化验证：
+    //   1. execCommand('insertText')——Chromium 下触发受信 beforeinput；
+    //   2. 合成 beforeinput/input 事件对（Lexical 在编辑器 root 监听）；
+    //   3. 重放仅含 text/plain 的合成 paste 事件，借用宿主自己的粘贴管道
+    //      （Lexical paste 命令 → getData('text/plain') → pasteText）。
+    // 第 3 级是 WKWebView（DSH Lite 等 WebKit 外壳）的关键退路：WebKit 的
+    // Lexical 分支会跳过合成 beforeinput 的 insertText 处理，前两级全部
+    // 静默失效；宿主 paste 管道不检查 isTrusted，且重放事件无 file 项，
+    // 本插件自身的 handlePaste 不会递归接管。
+    async function insertText(target, text) {
       const el0 = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
         ? target
         : document.activeElement
@@ -161,7 +168,7 @@ window.__ModuleLoader__.load({
         && (!collapsed || after.length - before.length >= text.length)
       if (verify(el0.textContent)) return true
 
-      // 退路：模拟 beforeinput/input 事件对，Lexical 据此接管插入。
+      // 退路一：模拟 beforeinput/input 事件对，Lexical 据此接管插入。
       el0.dispatchEvent(new InputEvent('beforeinput', {
         inputType: 'insertText',
         data: text,
@@ -173,6 +180,24 @@ window.__ModuleLoader__.load({
         data: text,
         bubbles: true,
       }))
+      if (verify(el0.textContent)) return true
+
+      // 退路二：重放纯文本 paste 事件，走宿主 Lexical 自己的粘贴管道。
+      // WKWebView 下这是唯一可靠路径；Lexical 的 paste 命令同步执行，
+      // 但 DOM reconcile 可能在微任务批次后落盘，故再做一次延迟复核。
+      try {
+        const transfer = new DataTransfer()
+        transfer.setData('text/plain', text)
+        el0.dispatchEvent(new ClipboardEvent('paste', {
+          clipboardData: transfer,
+          bubbles: true,
+          cancelable: true,
+        }))
+      } catch {
+        // ClipboardEvent 构造不可用（老 WebKit）时放弃本退路
+      }
+      if (verify(el0.textContent)) return true
+      await new Promise((resolve) => setTimeout(resolve, 50))
       return verify(el0.textContent)
     }
 
@@ -353,10 +378,10 @@ window.__ModuleLoader__.load({
         try {
           const { id } = await uploadImage(file)
           const text = attachmentReference(id)
-          const ok = insertText(event.target, text)
-          if (!ok) insertText(event.target, '[图片插入失败: 输入框不支持插入]')
+          const ok = await insertText(event.target, text)
+          if (!ok) await insertText(event.target, '[图片插入失败: 输入框不支持插入]')
         } catch (error) {
-          insertText(event.target, `[图片上传失败: ${error.message}]`)
+          await insertText(event.target, `[图片上传失败: ${error.message}]`)
         }
       }
     }

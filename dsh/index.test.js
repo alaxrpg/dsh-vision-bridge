@@ -278,10 +278,18 @@ describe('dsh-vision-bridge client contenteditable paste', () => {
   })
 
   it('should insert an explicit failure message when the target cannot be typed into', () => {
-    assert.ok(clientSource.includes('const ok = insertText(event.target, text)'))
-    assert.ok(clientSource.includes("if (!ok) insertText(event.target, '[图片插入失败: 输入框不支持插入]')"))
+    assert.ok(clientSource.includes('const ok = await insertText(event.target, text)'))
+    assert.ok(clientSource.includes("if (!ok) await insertText(event.target, '[图片插入失败: 输入框不支持插入]')"))
     // 既有上传失败分支不受影响
     assert.ok(clientSource.includes('[图片上传失败: ${error.message}]'))
+  })
+
+  it('should replay a plain-text paste as the WebKit fallback insertion path', () => {
+    // WKWebView（DSH Lite 等 WebKit 外壳）下 execCommand 与合成 beforeinput
+    // 均被宿主 Lexical 跳过，必须保留重放纯文本 paste 的第三级退路。
+    assert.ok(clientSource.includes('async function insertText'))
+    assert.match(clientSource, /new ClipboardEvent\('paste', \{\s*clipboardData: transfer/)
+    assert.ok(clientSource.includes("transfer.setData('text/plain', text)"))
   })
 
   it('should refresh the verdict TTL before expiry', () => {
