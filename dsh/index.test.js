@@ -292,6 +292,16 @@ describe('dsh-vision-bridge client contenteditable paste', () => {
     assert.ok(clientSource.includes("transfer.setData('text/plain', text)"))
   })
 
+  it('should verify the paste-replay fallback by textContent change, not literal match', () => {
+    // 宿主 detect-projection 会把「▧ 图片 #id」引用投影成 chip，textContent
+    // 混入不可见占位字符，逐字符 includes/长度断言会把成功插入误判为失败，
+    // 进而在输入框补插多余的「图片插入失败」提示（v0.3.7 实测回归）。
+    assert.match(clientSource, /delivered = el0\.textContent !== before/)
+    assert.match(clientSource, /return el0\.textContent !== before/)
+    // 严格 verify 仍只服务直改 DOM 的前两级退路
+    assert.match(clientSource, /const verify = \(after\) => after !== before[\s\S]*?after\.includes\(text\)/)
+  })
+
   it('should refresh the verdict TTL before expiry', () => {
     assert.ok(clientSource.includes('const verdictRefreshTimers = new Map()'))
     assert.match(clientSource, /function scheduleVerdictRefresh\(label\)[\s\S]*?VERDICT_MAX_AGE_MS - 5000/)

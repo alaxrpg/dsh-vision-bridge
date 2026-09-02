@@ -113,7 +113,7 @@ window.__ModuleLoader__.load({
     // 目标解析：显式传入 TEXTAREA/INPUT 则用之，否则取当前焦点元素。
     // DSH 0.1.2-alpha 起输入框是 Lexical 受控 contenteditable（activeElement
     // 是 div 而非表单控件），guard 不能只认 TEXTAREA/INPUT。插入按退路链
-    // 逐级尝试，每级都用 textContent 变化验证：
+    // 逐级尝试：
     //   1. execCommand('insertText')——Chromium 下触发受信 beforeinput；
     //   2. 合成 beforeinput/input 事件对（Lexical 在编辑器 root 监听）；
     //   3. 重放仅含 text/plain 的合成 paste 事件，借用宿主自己的粘贴管道
@@ -121,7 +121,10 @@ window.__ModuleLoader__.load({
     // 第 3 级是 WKWebView（DSH Lite 等 WebKit 外壳）的关键退路：WebKit 的
     // Lexical 分支会跳过合成 beforeinput 的 insertText 处理，前两级全部
     // 静默失效；宿主 paste 管道不检查 isTrusted，且重放事件无 file 项，
-    // 本插件自身的 handlePaste 不会递归接管。
+    // 本插件自身的 handlePaste 不会递归接管。第 1/2 级直改 DOM、形态可
+    // 断言，用严格 verify（includes+长度增量）；第 3 级的交付验证只看
+    // textContent 变化——宿主 detect-projection 会把「▧ 图片 #id」引用
+    // 投影成 chip，逐字符断言会误判（详见该级注释）。
     async function insertText(target, text) {
       const el0 = target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')
         ? target
@@ -185,6 +188,13 @@ window.__ModuleLoader__.load({
       // 退路二：重放纯文本 paste 事件，走宿主 Lexical 自己的粘贴管道。
       // WKWebView 下这是唯一可靠路径；Lexical 的 paste 命令同步执行，
       // 但 DOM reconcile 可能在微任务批次后落盘，故再做一次延迟复核。
+      // 交付验证只用「textContent 发生变化」：宿主对进入文档的文本做
+      // detect-projection——本插件的「▧ 图片 #id」引用格式会被投影成
+      // chip 节点，textContent 里混入 U+E100-E11D/U+FFFC 等不可见占位
+      // 字符，逐字符断言（includes/长度增量）会把成功插入误判为失败，
+      // 进而在输入框补插多余的「图片插入失败」提示。合成 paste 无原生
+      // 默认行为，textContent 的变化只能来自宿主管线的写入。
+      let delivered = false
       try {
         const transfer = new DataTransfer()
         transfer.setData('text/plain', text)
@@ -193,12 +203,13 @@ window.__ModuleLoader__.load({
           bubbles: true,
           cancelable: true,
         }))
+        delivered = el0.textContent !== before
       } catch {
         // ClipboardEvent 构造不可用（老 WebKit）时放弃本退路
       }
-      if (verify(el0.textContent)) return true
+      if (delivered) return true
       await new Promise((resolve) => setTimeout(resolve, 50))
-      return verify(el0.textContent)
+      return el0.textContent !== before
     }
 
     // 上传图片到服务端
